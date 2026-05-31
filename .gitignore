@@ -1,0 +1,54 @@
+# Variables de entorno con credenciales
+.env
+.env.local
+.env.*.local
+
+# Archivos de log
+*.log
+ubiquiti_monitor.log
+
+# Directorio de caché de Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Entornos virtuales
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Bases de datos locales
+*.db
+*.sqlite
+*.sqlite3
+
+# Datos de Docker volúmenes (local)
+influxdb_data/
+grafana_data/
+
+# Archivos temporales
+*.tmp
+*.temp
+
+# Node modules (si se usa Node en algún momento)
+node_modules/
+
+# Dependencias de Python
+*.egg-info/
+dist/
+build/
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db

@@ -1,0 +1,23 @@
+# Docker
+node_modules/
+dashboard/node_modules/
+dashboard/dist/
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.env
+*.log
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

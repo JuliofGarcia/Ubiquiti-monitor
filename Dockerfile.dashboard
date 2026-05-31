@@ -1,0 +1,28 @@
+# Stage 1: Build React app
+FROM node:20-alpine AS build
+WORKDIR /app
+COPY dashboard/package.json dashboard/package-lock.json* ./
+RUN npm ci 2>/dev/null || npm install
+COPY dashboard/ ./
+RUN npm run build
+
+# Stage 2: Python + React build
+FROM python:3.10-slim
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY api.py .
+COPY config.py .
+COPY --from=build /app/dist /app/dashboard/dist
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:5000/api/health || exit 1
+
+EXPOSE 5000
+CMD ["python", "-u", "api.py"]
