@@ -111,37 +111,6 @@ CUSTOM_FIELDS = {
 }
 
 # ============================================================================
-# CONFIGURACIÓN DE GRAFANA (LEGACY - reemplazado por dashboard React)
-# ============================================================================
-GRAFANA_CONFIG = {
-    "datasource": "InfluxDB-Ubiquiti",
-    "default_dashboard_refresh": "30s",
-    "dashboard_tags": ["ubiquiti", "network", "monitoring"],
-    "panels": {
-        "site_status": {
-            "type": "stat",
-            "title": "Estado de Sites",
-            "description": "Número de sites activos vs inactivos"
-        },
-        "device_availability": {
-            "type": "gauge",
-            "title": "Disponibilidad de Dispositivos",
-            "description": "% de dispositivos conectados vs caídos"
-        },
-        "traffic_throughput": {
-            "type": "timeseries",
-            "title": "Tráfico en Tiempo Real",
-            "description": "Descarga y carga por site"
-        },
-        "zone_summary": {
-            "type": "table",
-            "title": "Resumen por Zona",
-            "description": "Estadísticas agregadas por zona/departamento"
-        }
-    }
-}
-
-# ============================================================================
 # CONFIGURACIÓN DE NOTIFICACIONES
 # ============================================================================
 NOTIFICATION_CONFIG = {
@@ -172,6 +141,5 @@ CONFIG = {
     "zones": ZONE_MAPPING,
     "alerts": ALERT_THRESHOLDS,
     "custom_fields": CUSTOM_FIELDS,
-    "grafana": GRAFANA_CONFIG,  # LEGACY
     "notifications": NOTIFICATION_CONFIG
 }
