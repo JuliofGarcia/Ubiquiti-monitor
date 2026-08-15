@@ -12,18 +12,17 @@ export default function SiteModal({ site, onClose }) {
 
   if (!site) return null;
 
-  return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+    return (
+      <div className="modal-overlay">
+        <div className="modal-content" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h3>{site.site_name}</h3>
           <button className="modal-close" onClick={onClose}>×</button>
         </div>
         <div className="modal-body">
-          <div className="modal-grid">
-            <div className="modal-item"><strong>Zona:</strong> {site.zone || "—"}</div>
-            <div className="modal-item"><strong>Departamento:</strong> {site.department || "—"}</div>
-            <div className="modal-item"><strong>Etapa:</strong> <span className={`badge ${site.estado === "Operación" ? "badge-active" : ""}`}>{site.estado || "—"}</span></div>
+<div className="modal-grid">
+    <div className="modal-item"><strong>Departamento:</strong> {site.department || "—"}</div>
+    <div className="modal-item"><strong>Etapa:</strong> <span className={`badge ${site.estado === "Operación" ? "badge-active" : ""}`}>{site.estado || "—"}</span></div>
             <div className="modal-item"><strong>Inicio Operación:</strong> {site.fecha_inicio || "—"}</div>
             <div className="modal-item"><strong>Horas caído:</strong> {(() => {
               const getDiff = (lastOnline) => {

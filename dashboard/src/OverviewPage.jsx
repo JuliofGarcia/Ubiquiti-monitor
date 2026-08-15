@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from "react";
-import { fetchStats, fetchSites, fetchTraffic, fetchActivity, fetchZones, fetchAlerts } from "./api";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { fetchStats, fetchSites, fetchTraffic, fetchActivity, fetchDepartments, fetchAlerts } from "./api";
 import StatsCards from "./components/StatsCards";
 import TrafficChart from "./components/TrafficChart";
 import ActivityChart from "./components/ActivityChart";
@@ -14,7 +14,9 @@ export default function OverviewPage({ onSiteSelect }) {
   const [alerts, setAlerts] = useState([]);
   const [modalSite, setModalSite] = useState(null);
   const [showAllAlerts, setShowAllAlerts] = useState(false);
-  const [zones, setZones] = useState([]);
+  const resizeRef = useRef(false);
+  const ignoreNextOverlay = useRef(false);
+  const [departments, setDepartments] = useState([]);
   const [allJuntas, setAllJuntas] = useState([]);
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -22,7 +24,7 @@ export default function OverviewPage({ onSiteSelect }) {
   const [suggestions, setSuggestions] = useState([]);
 
   const [filters, setFilters] = useState({
-    zone: "",
+    department: "",
     status: "",
     search: "",
     estado: "",
@@ -40,15 +42,15 @@ export default function OverviewPage({ onSiteSelect }) {
     }
     setError(null);
     try {
-      const chartParams = { zone: filters.zone, estado: filters.estado };
-      const [statsData, zonesData, trafficData, activityData, alertsData, sitesData] = await Promise.all([
+      const chartParams = { department: filters.department, estado: filters.estado };
+      const [statsData, deptsData, trafficData, activityData, alertsData, sitesData] = await Promise.all([
         fetchStats(),
-        fetchZones(),
+        fetchDepartments(),
         fetchTraffic(trafficRange, null, chartParams),
         fetchActivity(activityRange, null, chartParams),
         fetchAlerts(),
         fetchSites({
-          zone: filters.zone,
+          department: filters.department,
           status: filters.status,
           search: filters.search,
           estado: filters.estado,
@@ -56,7 +58,7 @@ export default function OverviewPage({ onSiteSelect }) {
         }),
       ]);
       setStats(statsData);
-      setZones(zonesData);
+      setDepartments(deptsData);
       setTraffic(trafficData);
       setActivity(activityData);
       setAlerts(alertsData);
@@ -83,7 +85,7 @@ export default function OverviewPage({ onSiteSelect }) {
     setFilters((prev) => ({ ...prev, [key]: value }));
   };
 
-  const hasActiveFilters = filters.estado || filters.zone || filters.health;
+  const hasActiveFilters = filters.estado || filters.department || filters.health;
   const dropdownJuntas = hasActiveFilters
     ? [...new Set([...sites.map((s) => s.site_name), ...(filters.search ? [filters.search] : [])])].sort()
     : allJuntas;
@@ -126,6 +128,7 @@ export default function OverviewPage({ onSiteSelect }) {
       <div style={{ position: "relative", marginBottom: "16px" }}>
         <input
           type="text"
+          className="site-search-input"
           placeholder="Buscar junta..."
           value={filters.search}
           onChange={(e) => {
@@ -144,13 +147,6 @@ export default function OverviewPage({ onSiteSelect }) {
             }
           }}
           onBlur={() => setTimeout(() => setSuggestions([]), 200)}
-          style={{
-            width: "100%",
-            padding: "8px 12px",
-            borderRadius: "var(--radius)",
-            border: "1px solid var(--border)",
-            fontSize: "0.9rem"
-          }}
         />
         {suggestions.length > 0 && (
           <ul style={{
@@ -219,10 +215,10 @@ export default function OverviewPage({ onSiteSelect }) {
             <option value="Operación">En Operación</option>
             <option value="Implementación">En Implementación</option>
           </select>
-          <select value={filters.zone} onChange={(e) => handleFilterChange("zone", e.target.value)}>
-            <option value="">Todas las zonas</option>
-            {zones.map((z) => (<option key={z} value={z}>{z}</option>))}
-          </select>
+               <select value={filters.department} onChange={(e) => handleFilterChange("department", e.target.value)}>
+                 <option value="">Todos los departamentos</option>
+                 {departments.map((d) => (<option key={d} value={d}>{d}</option>))}
+               </select>
           <select value={filters.health} onChange={(e) => handleFilterChange("health", e.target.value)}>
             <option value="">Todo estado</option>
             <option value="caido">Totalmente caído</option>
@@ -246,55 +242,64 @@ export default function OverviewPage({ onSiteSelect }) {
       <SiteModal site={modalSite} onClose={() => setModalSite(null)} />
 
       {showAllAlerts && (
-        <div className="modal-overlay" onClick={() => setShowAllAlerts(false)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h3>Todas las juntas en operación sin conectividad ({alerts.length})</h3>
-              <button className="modal-close" onClick={() => setShowAllAlerts(false)}>×</button>
+        <div className="modal-overlay" onMouseUp={() => { if (resizeRef.current) { ignoreNextOverlay.current = true; } resizeRef.current = false; }} onClick={() => { if (!ignoreNextOverlay.current) setShowAllAlerts(false); ignoreNextOverlay.current = false; }}>
+          <div className="modal-content" style={{ width: "720px", height: "auto", maxHeight: "80vh", overflow: "auto" }} onClick={(e) => e.stopPropagation()} onMouseDown={() => { resizeRef.current = true; }}>
+            <div className="modal-header" style={{ background: "linear-gradient(135deg, #dc2626, #b91c1c)", color: "white", borderRadius: "var(--radius) var(--radius) 0 0" }}>
+              <h3 style={{ color: "white", margin: 0, fontSize: "1rem", display: "flex", alignItems: "center", gap: "8px" }}>
+                <span style={{ fontSize: "1.2rem" }}>⚠️</span>
+                Juntas sin conectividad ({alerts.length})
+              </h3>
+              <button className="modal-close" onClick={() => setShowAllAlerts(false)} style={{ color: "rgba(255,255,255,0.8)", fontSize: "1.5rem" }}>×</button>
             </div>
-            <div className="modal-body" style={{ maxHeight: "60vh", overflowY: "auto" }}>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Junta</th>
-                    <th>Zona</th>
-                    <th>APs</th>
-                    <th>Caída</th>
-                    <th>Última Conexión</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {alerts.map((a) => (
-                    <tr key={a.site_id} style={{ cursor: "pointer" }} onClick={() => { setShowAllAlerts(false); setModalSite(a); }}>
-                      <td>{a.site_name}</td>
-                      <td>{a.zone || "—"}</td>
-                      <td>{a.ap_online || 0}/{a.ap_total || 0}</td>
-                      <td>
-                        {(() => {
-                          const getDiff = (lastOnline) => {
-                            if (!lastOnline || lastOnline === "0001-01-01T00:00:00Z") return "—";
-                            const lastDate = new Date(lastOnline);
-                            const now = new Date();
-                            const diffMs = now - lastDate;
-                            if (diffMs < 0) return "—";
-                            const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
-                            const diffMinutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
-                            return `${diffHours}h ${diffMinutes}m`;
-                          };
-
-                          if (typeof a.hours_down === "number") {
-                            return a.hours_down >= 1
-                              ? `${Math.floor(a.hours_down)}h ${Math.round((a.hours_down % 1) * 60)}m`
-                              : `${Math.round(a.hours_down * 60)}m`;
-                          }
-                          return getDiff(a.last_online);
-                        })()}
-                      </td>
-                      <td>{a.last_online && a.last_online !== "0001-01-01T00:00:00Z" ? new Date(a.last_online).toLocaleString("es-CO") : "—"}</td>
+            <div className="modal-body" style={{ padding: 0 }}>
+              <div style={{ maxHeight: "55vh", overflowY: "auto" }}>
+                <table style={{ borderCollapse: "collapse", width: "100%" }}>
+                  <thead>
+                    <tr style={{ background: "#fef2f2" }}>
+                      <th style={{ padding: "10px 14px", textAlign: "left", fontSize: "12px", fontWeight: 600, color: "#991b1b", borderBottom: "2px solid #fecaca", textTransform: "uppercase", letterSpacing: "0.05em" }}>Junta</th>
+                      <th style={{ padding: "10px 14px", textAlign: "left", fontSize: "12px", fontWeight: 600, color: "#991b1b", borderBottom: "2px solid #fecaca", textTransform: "uppercase", letterSpacing: "0.05em" }}>Departamento</th>
+                      <th style={{ padding: "10px 14px", textAlign: "center", fontSize: "12px", fontWeight: 600, color: "#991b1b", borderBottom: "2px solid #fecaca", textTransform: "uppercase", letterSpacing: "0.05em" }}>APs</th>
+                      <th style={{ padding: "10px 14px", textAlign: "center", fontSize: "12px", fontWeight: 600, color: "#991b1b", borderBottom: "2px solid #fecaca", textTransform: "uppercase", letterSpacing: "0.05em" }}>Caída</th>
+                      <th style={{ padding: "10px 14px", textAlign: "center", fontSize: "12px", fontWeight: 600, color: "#991b1b", borderBottom: "2px solid #fecaca", textTransform: "uppercase", letterSpacing: "0.05em" }}>Última Conexión</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {alerts.map((a, i) => (
+                      <tr key={a.site_id} style={{ cursor: "pointer", background: i % 2 === 0 ? "white" : "#fef2f2", transition: "background 0.15s" }} onClick={() => { setShowAllAlerts(false); setModalSite(a); }} onMouseEnter={e => e.target.style.background = "#fee2e2"} onMouseLeave={e => e.target.style.background = i % 2 === 0 ? "white" : "#fef2f2"}>
+                        <td style={{ padding: "10px 14px", fontWeight: 500, color: "#111827", borderBottom: "1px solid #f3f4f6" }}>{a.site_name}</td>
+                        <td style={{ padding: "10px 14px", color: "#6b7280", borderBottom: "1px solid #f3f4f6" }}>{a.department || "—"}</td>
+                        <td style={{ padding: "10px 14px", textAlign: "center", borderBottom: "1px solid #f3f4f6" }}>
+                          <span style={{ background: "#fee2e2", color: "#991b1b", padding: "2px 8px", borderRadius: "999px", fontSize: "12px", fontWeight: 600 }}>
+                            {a.ap_online || 0}/{a.ap_total || 0}
+                          </span>
+                        </td>
+                        <td style={{ padding: "10px 14px", textAlign: "center", color: "#dc2626", fontWeight: 600, borderBottom: "1px solid #f3f4f6" }}>
+                          {(() => {
+                            const getDiff = (lastOnline) => {
+                              if (!lastOnline || lastOnline === "0001-01-01T00:00:00Z") return "—";
+                              const lastDate = new Date(lastOnline);
+                              const now = new Date();
+                              const diffMs = now - lastDate;
+                              if (diffMs < 0) return "—";
+                              const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+                              const diffMinutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+                              return `${diffHours}h ${diffMinutes}m`;
+                            };
+
+                            if (typeof a.hours_down === "number") {
+                              return a.hours_down >= 1
+                                ? `${Math.floor(a.hours_down)}h ${Math.round((a.hours_down % 1) * 60)}m`
+                                : `${Math.round(a.hours_down * 60)}m`;
+                            }
+                            return getDiff(a.last_online);
+                          })()}
+                        </td>
+                        <td style={{ padding: "10px 14px", textAlign: "center", color: "#6b7280", fontSize: "13px", borderBottom: "1px solid #f3f4f6" }}>{a.last_online && a.last_online !== "0001-01-01T00:00:00Z" ? new Date(a.last_online).toLocaleString("es-CO") : "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
         </div>

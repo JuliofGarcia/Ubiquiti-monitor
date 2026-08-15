@@ -83,15 +83,31 @@ export async function fetchSiteDevices(siteId) {
   return res.json();
 }
 
-export async function fetchZones() {
-  const res = await request("/zones");
+export async function fetchDepartments() {
+  const res = await request("/departments");
   return res.json();
 }
 
-export async function toggleEstado(code, estado) {
+export async function fetchReport(params = {}) {
+  const query = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => {
+    if (v && v !== "all") query.set(k, v);
+  });
+  const res = await request(`/report?${query}`);
+  return res.json();
+}
+
+export async function toggleEstado(code, estado, fecha_inicio) {
+  const body = { code, estado };
+  if (fecha_inicio) body.fecha_inicio = fecha_inicio;
   const res = await request("/toggle-estado", {
     method: "POST",
-    body: JSON.stringify({ code, estado }),
+    body: JSON.stringify(body),
   });
   return res.json();
 }
+
+export async function fetchExcelReport(siteId) {
+  return request(`/report/excel?site_id=${siteId}`);
+}
+

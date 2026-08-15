@@ -5,7 +5,6 @@ WORKDIR /app
 # Instalar dependencias del sistema
 RUN apt-get update && apt-get install -y \
     curl \
-    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Copiar requirements
@@ -17,9 +16,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copiar código de la aplicación
 COPY ubiquiti_backend.py .
 COPY config.py .
-COPY influx_utils.py .
 COPY base_instalaciones.xlsx .
-COPY juntas_operacion.xlsx .
+COPY base_operacion.xlsx .
 
 # Crear directorio de logs
 RUN mkdir -p /app/logs

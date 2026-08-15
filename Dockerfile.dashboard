@@ -19,6 +19,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY api.py .
 COPY config.py .
+COPY base_operacion.xlsx .
 COPY --from=build /app/dist /app/dashboard/dist
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

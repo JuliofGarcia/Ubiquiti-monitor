@@ -30,6 +30,31 @@ export default function SitesTable({ sites, onSelect, loading }) {
     return <span className="badge">—</span>;
   };
 
+  const downloadExcel = (e, siteId) => {
+    e.stopPropagation();
+    const token = localStorage.getItem("token");
+    const url = `/api/report/excel?site_id=${siteId}`;
+    
+    fetch(url, {
+      headers: { "Authorization": `Bearer ${token}` }
+    })
+      .then(res => {
+        if (!res.ok) throw new Error("Error al descargar");
+        return res.blob();
+      })
+      .then(blob => {
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `Reporte_Site_${siteId}.xlsx`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.URL.revokeObjectURL(url);
+      })
+      .catch(err => alert("Error descargando reporte: " + err.message));
+  };
+
   return (
     <div className="panel">
       <div className="panel-header">
@@ -53,16 +78,17 @@ export default function SitesTable({ sites, onSelect, loading }) {
         ) : (
           <table>
             <thead>
-              <tr>
-                <th>Nombre</th>
-                <th>Zona</th>
-                <th>Estado</th>
-                <th>Etapa</th>
-                <th>Est. APs</th>
-                <th>Clientes</th>
-                <th>Online</th>
-                <th>Caídos</th>
-              </tr>
+               <tr>
+                 <th>Nombre</th>
+                  <th>Departamento</th>
+                 <th>Estado</th>
+                 <th>Etapa</th>
+                 <th>Est. APs</th>
+                 <th>Clientes</th>
+                 <th>Online</th>
+                 <th>Caídos</th>
+                 <th>Reporte</th>
+               </tr>
             </thead>
             <tbody>
               {paged.map((site) => (
@@ -75,7 +101,7 @@ export default function SitesTable({ sites, onSelect, loading }) {
                     {site.site_name}
                     {site.fecha_inicio && <small style={{ color: "var(--text-muted)", marginLeft: 6 }}>{site.fecha_inicio}</small>}
                   </td>
-                  <td>{site.zone || "—"}</td>
+                   <td>{site.department || "—"}</td>
                   <td>{getStatusBadge(site)}</td>
                   <td>
                     <span className={site.estado === "Operación" ? "badge badge-active" : "badge"}>
@@ -85,8 +111,17 @@ export default function SitesTable({ sites, onSelect, loading }) {
                   <td>{getHealthBadge(site)}</td>
                   <td>{site.device_count}</td>
                   <td>{site.devices_available}</td>
-                  <td>{site.device_outage_count}</td>
-                </tr>
+                   <td>{site.device_outage_count}</td>
+                   <td>
+                     <button 
+                       className="btn-refresh" 
+                       style={{ padding: "4px 8px", fontSize: "11px" }}
+                       onClick={(e) => downloadExcel(e, site.site_id)}
+                     >
+                       Excel
+                     </button>
+                   </td>
+                 </tr>
               ))}
             </tbody>
           </table>

@@ -95,19 +95,19 @@ def format_alert_message(alerts):
     if total == 1:
         a = alerts[0]
         name = a.get("site_name", "?")
-        zone = a.get("zone", "?")
+        dept = a.get("department", "?")
         aps = f"{a.get('ap_online', 0)}/{a.get('ap_total', 0)}"
         hours = a.get("hours_down")
-        return f"<b>🚨 JUNTA SIN CONECTIVIDAD</b>\n\n<b>{name}</b>\n📍 Zona: {zone}\n📡 Access Point: {aps}"
-
+        return f"<b>🚨 JUNTA SIN CONECTIVIDAD</b>\n\n<b>{name}</b>\n📍 Depto: {dept}\n📡 Access Point: {aps}"
+    
     lines = [f"<b>🚨 {total} JUNTAS SIN CONECTIVIDAD</b>\n"]
     for a in alerts[:10]:
         name = a.get("site_name", "?")
-        zone = a.get("zone", "?")
+        dept = a.get("department", "?")
         aps = f"{a.get('ap_online', 0)}/{a.get('ap_total', 0)}"
         hours = a.get("hours_down")
         down_str = f" · {hours}h caída" if isinstance(hours, (int, float)) else ""
-        lines.append(f"• <b>{name}</b> ({zone}) APs: {aps}{down_str}")
+        lines.append(f"• <b>{name}</b> ({dept}) APs: {aps}{down_str}")
 
     if total > 10:
         lines.append(f"\n... y {total - 10} más")

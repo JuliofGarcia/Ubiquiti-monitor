@@ -1,7 +1,7 @@
 import { useState } from "react";
 import {
-  LineChart,
-  Line,
+  AreaChart,
+  Area,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -9,7 +9,7 @@ import {
   ResponsiveContainer,
   Legend,
 } from "recharts";
-
+ 
 const RANGES = [
   { label: "1h", value: "1h", hours: 1 },
   { label: "6h", value: "6h", hours: 6 },
@@ -17,28 +17,46 @@ const RANGES = [
   { label: "7d", value: "168h", hours: 168 },
   { label: "30d", value: "720h", hours: 720 },
 ];
-
+ 
+const CustomTooltip = ({ active, payload, label }) => {
+  if (active && payload && payload.length) {
+    return (
+      <div className="custom-traffic-tooltip">
+        <p className="tooltip-label">{new Date(label).toLocaleString("es-CO")}</p>
+        <div className="tooltip-values">
+          {payload.map((entry, index) => (
+            <div key={index} style={{ color: entry.color }}>
+              <span className="tooltip-name">{entry.name}: </span>
+              <span className="tooltip-value">{Number(entry.value).toFixed(2)} GB</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+  return null;
+};
+ 
 export default function TrafficChart({ data, range, onRangeChange, loading, title }) {
   const [customMode, setCustomMode] = useState(false);
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
-
+ 
   const hasData = data && data.length > 0;
   const allZero = hasData && data.every((d) => d.download === 0 && d.upload === 0);
-
-  // Escalar los datos a GB para mejor visualización
+ 
   const scaled = data.map((d) => ({
     ...d,
     download: Number((d.download * 1000).toFixed(4)),
     upload: Number((d.upload * 1000).toFixed(4)),
   }));
-
+ 
   const applyCustomRange = () => {
     if (dateFrom && dateTo) {
       onRangeChange(`custom|${dateFrom}|${dateTo}`);
     }
   };
-
+ 
   return (
     <div className="panel">
       <div className="panel-header">
@@ -90,11 +108,23 @@ export default function TrafficChart({ data, range, onRangeChange, loading, titl
           <div className="chart-placeholder">Sin datos de tráfico disponibles</div>
         ) : (
           <ResponsiveContainer width="100%" height={280}>
-            <LineChart data={scaled}>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+            <AreaChart data={scaled}>
+              <defs>
+                <linearGradient id="colorDownload" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="var(--blue)" stopOpacity={0.3}/>
+                  <stop offset="95%" stopColor="var(--blue)" stopOpacity={0}/>
+                </linearGradient>
+                <linearGradient id="colorUpload" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="var(--orange)" stopOpacity={0.3}/>
+                  <stop offset="95%" stopColor="var(--orange)" stopOpacity={0}/>
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--border)" opacity={0.5} />
               <XAxis
                 dataKey="time"
-                tick={{ fontSize: 11 }}
+                tick={{ fontSize: 11, fill: "var(--text-muted)" }}
+                axisLine={false}
+                tickLine={false}
                 tickFormatter={(t) => {
                   const d = new Date(t);
                   return d.toLocaleString("es-CO", {
@@ -105,29 +135,37 @@ export default function TrafficChart({ data, range, onRangeChange, loading, titl
                   });
                 }}
               />
-              <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => v.toFixed(1)} />
-              <Tooltip
-                labelFormatter={(t) => new Date(t).toLocaleString("es-CO")}
-                formatter={(v) => `${Number(v).toFixed(2)} GB`}
+              <YAxis 
+                tick={{ fontSize: 11, fill: "var(--text-muted)" }} 
+                axisLine={false}
+                tickLine={false}
+                tickFormatter={(v) => v.toFixed(1)} 
               />
+              <Tooltip content={<CustomTooltip />} />
               <Legend />
-              <Line
+              <Area
                 type="monotone"
                 dataKey="download"
-                name="Descarga (Rx) GB"
+                name="Descarga (Rx)"
                 stroke="var(--blue)"
-                strokeWidth={2}
+                strokeWidth={3}
+                fillOpacity={1}
+                fill="url(#colorDownload)"
                 dot={false}
+                activeDot={{ r: 6, strokeWidth: 0 }}
               />
-              <Line
+              <Area
                 type="monotone"
                 dataKey="upload"
-                name="Carga (Tx) GB"
+                name="Carga (Tx)"
                 stroke="var(--orange)"
-                strokeWidth={2}
+                strokeWidth={3}
+                fillOpacity={1}
+                fill="url(#colorUpload)"
                 dot={false}
+                activeDot={{ r: 6, strokeWidth: 0 }}
               />
-            </LineChart>
+            </AreaChart>
           </ResponsiveContainer>
         )}
       </div>

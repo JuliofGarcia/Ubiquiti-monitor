@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from "react";
-import { fetchTraffic, fetchActivity, fetchDevices, fetchSiteDevices, fetchSites, toggleEstado } from "./api";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { fetchTraffic, fetchActivity, fetchDevices, fetchSiteDevices, fetchSites, toggleEstado, fetchExcelReport } from "./api";
 import TrafficChart from "./components/TrafficChart";
 import ActivityChart from "./components/ActivityChart";
 import DevicesTable from "./components/DevicesTable";
@@ -14,21 +14,24 @@ export default function SiteDetailPage({ site, onBack }) {
   const [error, setError] = useState(null);
   const [trafficRange, setTrafficRange] = useState("24h");
   const [activityRange, setActivityRange] = useState("168");
+  const [showFechaModal, setShowFechaModal] = useState(false);
+  const resizeRef = useRef(false);
+  const ignoreNextOverlay = useRef(false);
+  const [pendingEstado, setPendingEstado] = useState(null);
+  const [fechaInicio, setFechaInicio] = useState(new Date().toISOString().split('T')[0]);
 
   const loadData = useCallback(async (isRefresh = false) => {
     if (!isRefresh) setLoading(true);
     setError(null);
     try {
-      const codeMatch = currentSite.site_name?.match(/^(\d+)/);
-      const code = codeMatch ? codeMatch[1] : "";
+      const code = currentSite.inred_code;
       const sid = currentSite.site_id;
-      console.log("DEBUG: Loading data for site:", sid, code);
       const [trafficData, activityData, devicesData, statsData, siteData] = await Promise.all([
         fetchTraffic(trafficRange, sid),
         fetchActivity(activityRange, sid),
         fetchDevices({ site_id: sid }),
         fetchSiteDevices(sid),
-        code ? fetchSites({ search: code }) : Promise.resolve([]),
+        (code && code !== "unknown") ? fetchSites({ search: code }) : Promise.resolve([]),
       ]);
       setTraffic(trafficData);
       setActivity(activityData);
@@ -36,12 +39,11 @@ export default function SiteDetailPage({ site, onBack }) {
       setDeviceStats(statsData);
       if (siteData.length > 0) setCurrentSite(siteData[0]);
     } catch (err) {
-      console.error("DEBUG: Error loading data:", err);
       setError(err.message);
     } finally {
       setLoading(false);
     }
-  }, [currentSite.site_id, currentSite.site_name, trafficRange, activityRange]);
+  }, [currentSite.site_id, currentSite.inred_code, trafficRange, activityRange]);
 
   useEffect(() => {
     loadData(false);
@@ -62,35 +64,73 @@ export default function SiteDetailPage({ site, onBack }) {
           <div>
             <h2>{currentSite.site_name}</h2>
             <div className="site-meta">
-              <span>Zona: {currentSite.zone || "—"}</span>
-              <span>Depto: {currentSite.department || "—"}</span>
+               <span>Departamento: {currentSite.department || "—"}</span>
               <span>Etapa: <span className={`badge ${currentSite.estado === "Operación" ? "badge-active" : ""}`}>{currentSite.estado || "—"}</span></span>
               {currentSite.fecha_inicio && <span>Inicio: {currentSite.fecha_inicio}</span>}
             </div>
           </div>
-              <button
-                className={`btn-toggle ${currentSite.estado === "Operación" ? "btn-toggle-op" : "btn-toggle-impl"}`}
-                onClick={async () => {
-                  const match = currentSite.site_name?.match(/^(\d+)/);
-                  const code = match ? match[1] : "";
-                  if (!code) {
-                    console.error("No se pudo obtener el código de la junta.");
-                    return;
-                  }
-                  const newEstado = currentSite.estado === "Operación" ? "Implementación" : "Operación";
-                  try {
-                    await toggleEstado(code, newEstado);
-                    // Actualizar el estado local inmediatamente para que el botón refleje el cambio
-                    setCurrentSite(prev => ({ ...prev, estado: newEstado }));
-                    loadData(false);
-                  } catch (err) {
-                    console.error("Error al cambiar estado:", err);
-                  }
-                }}
-              >
+        <div style={{ display: "flex", gap: 8 }}>
+           <button 
+             className="btn-refresh" 
+             onClick={async () => {
+               try {
+                 const res = await fetchExcelReport(currentSite.site_id);
+                 const blob = await res.blob();
+                 const url = window.URL.createObjectURL(blob);
+                 const a = document.createElement("a");
+                 a.href = url;
+                 a.download = `Reporte_${currentSite.site_name}.xlsx`;
+                 document.body.appendChild(a);
+                 a.click();
+                 window.URL.revokeObjectURL(url);
+                 a.remove();
+               } catch (err) {
+                 console.error("Error downloading Excel:", err);
+                 alert("Error al descargar el reporte Excel");
+               }
+             }}
+             style={{
+               padding: "8px 16px",
+               borderRadius: "6px",
+               fontWeight: "bold",
+               cursor: "pointer",
+               backgroundColor: "#16a34a",
+               color: "white",
+               border: "none"
+             }}
+           >
+             Exportar Excel
 
-            {currentSite.estado === "Operación" ? "Pasar a Implementación" : "Pasar a Operación"}
           </button>
+            <button
+              className={`btn-toggle ${currentSite.estado === "Operación" ? "btn-toggle-op" : "btn-toggle-impl"}`}
+              onClick={() => {
+                const code = currentSite.inred_code;
+                if (!code || code === "unknown") {
+                  console.error("No se pudo obtener el código de la junta.");
+                  return;
+                }
+                const newEstado = currentSite.estado === "Operación" ? "Implementación" : "Operación";
+                if (newEstado === "Operación") {
+                  setPendingEstado(newEstado);
+                  setFechaInicio(new Date().toISOString().split('T')[0]);
+                  setShowFechaModal(true);
+                } else {
+                  (async () => {
+                    try {
+                      await toggleEstado(code, newEstado);
+                      setCurrentSite(prev => ({ ...prev, estado: newEstado }));
+                      loadData(false);
+                    } catch (err) {
+                      console.error("Error al cambiar estado:", err);
+                    }
+                  })();
+                }
+              }}
+            >
+             {currentSite.estado === "Operación" ? "Pasar a Implementación" : "Pasar a Operación"}
+           </button>
+        </div>
         </div>
       </div>
 
@@ -153,6 +193,76 @@ export default function SiteDetailPage({ site, onBack }) {
       />
 
       <DevicesTable devices={devices} loading={loading} />
+
+      {showFechaModal && (
+        <div className="modal-overlay" onMouseUp={() => { if (resizeRef.current) { ignoreNextOverlay.current = true; } resizeRef.current = false; }} onClick={() => { if (!ignoreNextOverlay.current) setShowFechaModal(false); ignoreNextOverlay.current = false; }}>
+          <div className="modal-content" style={{ width: "auto", height: "auto", padding: "24px", maxWidth: "420px", overflow: "auto" }} onClick={e => e.stopPropagation()} onMouseDown={() => { resizeRef.current = true; }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+              <h3 style={{ margin: 0 }}>Fecha de Inicio de Operación</h3>
+              <button className="modal-close" onClick={() => setShowFechaModal(false)}>×</button>
+            </div>
+            <p>Ingrese la fecha en que <strong>{currentSite.site_name}</strong> inició operación:</p>
+            <input
+              type="date"
+              value={fechaInicio}
+              onChange={e => setFechaInicio(e.target.value)}
+              style={{
+                padding: "8px 12px",
+                borderRadius: "6px",
+                border: "1px solid #ccc",
+                width: "100%",
+                boxSizing: "border-box",
+                marginTop: "8px",
+                fontSize: "14px"
+              }}
+            />
+            <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end", marginTop: "16px" }}>
+              <button
+                onClick={() => setShowFechaModal(false)}
+                style={{
+                  padding: "8px 16px",
+                  borderRadius: "6px",
+                  border: "1px solid #d1d5db",
+                  background: "#f9fafb",
+                  cursor: "pointer",
+                  fontSize: "14px",
+                  color: "#374151",
+                  fontWeight: 500
+                }}
+                onMouseEnter={e => e.target.style.background = "#f3f4f6"}
+                onMouseLeave={e => e.target.style.background = "#f9fafb"}
+              >
+                Cancelar
+              </button>
+              <button
+                className="btn-refresh"
+                onClick={async () => {
+                  try {
+                    await toggleEstado(currentSite.inred_code, pendingEstado, fechaInicio);
+                    setCurrentSite(prev => ({ ...prev, estado: pendingEstado, fecha_inicio: fechaInicio }));
+                    setShowFechaModal(false);
+                    loadData(false);
+                  } catch (err) {
+                    console.error("Error al cambiar estado:", err);
+                    alert("Error al cambiar estado");
+                  }
+                }}
+                style={{
+                  padding: "8px 16px",
+                  borderRadius: "6px",
+                  border: "none",
+                  background: "#2563eb",
+                  color: "white",
+                  cursor: "pointer",
+                  fontWeight: "bold"
+                }}
+              >
+                Guardar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <footer className="footer">
         Actualizado: {new Date().toLocaleTimeString("es-CO")}
