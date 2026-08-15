@@ -3,6 +3,15 @@
 .env.local
 .env.*.local
 
+# Excel con datos privados (solo en servidor local, montados por volumen)
+*.xlsx
+
+# Datos sensibles de runtime en data/ (solo en servidor local)
+data/users.json
+data/telegram_sent_alerts.json
+data/estado_overrides.json
+data/coord_overrides.json
+
 # Archivos de log
 *.log
 ubiquiti_monitor.log

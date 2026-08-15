@@ -46,6 +46,9 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./config.py:/app/config.py:ro
+      # Datos privados (no están en git): montados desde el servidor local
+      - ./base_instalaciones.xlsx:/app/base_instalaciones.xlsx:ro
+      - ./base_operacion.xlsx:/app/base_operacion.xlsx:ro
     networks:
       - monitoring
     depends_on:
@@ -80,6 +83,8 @@ services:
       DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD}
     volumes:
       - ./data:/app/data
+      # base_operacion.xlsx es dato privado (no está en git): montado del servidor
+      - ./base_operacion.xlsx:/app/base_operacion.xlsx:ro
     networks:
       - monitoring
     depends_on:

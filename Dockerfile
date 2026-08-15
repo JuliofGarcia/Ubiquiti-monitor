@@ -14,10 +14,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copiar código de la aplicación
+# Los Excel (base_instalaciones.xlsx, base_operacion.xlsx) son datos privados
+# que NO viven en git: se montan por volumen desde el servidor (ver docker-compose).
 COPY ubiquiti_backend.py .
 COPY config.py .
-COPY base_instalaciones.xlsx .
-COPY base_operacion.xlsx .
 
 # Crear directorio de logs
 RUN mkdir -p /app/logs
