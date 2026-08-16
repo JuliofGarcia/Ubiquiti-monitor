@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
 
 const PAGE_SIZE = 15;
-const JUNTAS_PAGE_SIZE = 20;
+const JUNTAS_PAGE_SIZE = 15;
 
 const SEGUIMIENTO_COLORS = {
   "DESCRIPCIÓN": "#2563eb",
@@ -37,7 +37,7 @@ export default function TicketsPage({ role }) {
     department: "all",
     junta: "all",
     estado: "all",
-    tipo: "all",
+    subtipo: "all",
     search: "",
   });
 
@@ -48,7 +48,7 @@ export default function TicketsPage({ role }) {
     if (filters.department !== "all") query.set("department", filters.department);
     if (filters.junta !== "all") query.set("junta", filters.junta);
     if (filters.estado !== "all") query.set("estado", filters.estado);
-    if (filters.tipo !== "all") query.set("tipo", filters.tipo);
+    if (filters.subtipo !== "all") query.set("subtipo", filters.subtipo);
     if (filters.search) query.set("search", filters.search);
     Object.entries(extra).forEach(([k, v]) => { if (v) query.set(k, v); });
     return query;
@@ -207,7 +207,13 @@ export default function TicketsPage({ role }) {
   };
   const activeMetric = CHART_METRICS[chartMetric] || CHART_METRICS.indisp;
 
-  const fmtDate = (iso) => iso ? iso.slice(0, 16).replace("T", " ") : "—";
+  const fmtDate = (iso) => {
+    if (!iso) return "—";
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "—";
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
 
   return (
     <div>
@@ -268,18 +274,18 @@ export default function TicketsPage({ role }) {
             <option value="all">Todas las juntas</option>
             {juntas.map(j => <option key={j.code} value={j.code}>{j.name}</option>)}
           </select>
-          <select className="filter-select" style={{ padding: "8px 12px", borderRadius: "6px", border: "1px solid #ccc", minWidth: "130px", cursor: "pointer" }}
+          <select className="filter-select" style={{ padding: "8px 12px", borderRadius: "6px", border: "1px solid #ccc", minWidth: "150px", cursor: "pointer" }}
             value={filters.estado} onChange={e => setFilters({ ...filters, estado: e.target.value })}>
             <option value="all">Todos los estados</option>
             <option value="Abierto">Abiertos</option>
             <option value="Cerrado">Cerrados</option>
             <option value="Anulado">Anulados</option>
           </select>
-          <select className="filter-select" style={{ padding: "8px 12px", borderRadius: "6px", border: "1px solid #ccc", minWidth: "150px", cursor: "pointer" }}
-            value={filters.tipo} onChange={e => setFilters({ ...filters, tipo: e.target.value })}>
-            <option value="all">Todos los tipos</option>
-            <option value="incidente">Incidentes</option>
-            <option value="peticion">Peticiones</option>
+          <select className="filter-select" style={{ padding: "8px 12px", borderRadius: "6px", border: "1px solid #ccc", minWidth: "170px", cursor: "pointer" }}
+            value={filters.subtipo} onChange={e => setFilters({ ...filters, subtipo: e.target.value })}>
+            <option value="all">Todos</option>
+            <option value="juntas">Juntas</option>
+            <option value="seguimiento_interno">Juntas seguimiento interno</option>
           </select>
           <input type="text" placeholder="Buscar ticket, junta, municipio..." value={filters.search}
             style={{ padding: "8px 12px", borderRadius: "6px", border: "1px solid #ccc", minWidth: "220px" }}
@@ -436,6 +442,7 @@ export default function TicketsPage({ role }) {
                 <th>Departamento</th>
                 <th>Municipio</th>
                 <th>Centro Poblado</th>
+                <th>Subproyecto</th>
                 <th>Categoría</th>
                 <th>Prioridad</th>
                 <th>Estado</th>
@@ -456,6 +463,7 @@ export default function TicketsPage({ role }) {
                   <td>{row.departamento || "—"}</td>
                   <td>{row.municipio || "—"}</td>
                   <td>{row.centro_poblado || "—"}</td>
+                  <td>{row.sub_proyecto || "—"}</td>
                   <td style={{ maxWidth: 220 }}>{row.categoria || "—"}</td>
                   <td>
                     <span className={`badge ${String(row.prioridad).toLowerCase() === "baja" ? "badge-active" : String(row.prioridad).toLowerCase() === "alta" ? "badge-error" : "badge-warning"}`}>
@@ -474,7 +482,7 @@ export default function TicketsPage({ role }) {
               ))}
               {listData.length === 0 && (
                 <tr>
-                  <td colSpan="12" style={{ textAlign: "center", padding: "20px", color: "#888" }}>
+                  <td colSpan="13" style={{ textAlign: "center", padding: "20px", color: "#888" }}>
                     No se encontraron tickets con los filtros aplicados
                   </td>
                 </tr>
@@ -558,10 +566,10 @@ export default function TicketsPage({ role }) {
                         <tbody>
                           {(detail.paradas || []).map((p, i) => (
                             <tr key={i}>
-                              <td>{p.fecha_inicio_falla?.slice(0, 16).replace("T", " ") || "—"}</td>
-                              <td>{p.fecha_fin_falla?.slice(0, 16).replace("T", " ") || "—"}</td>
-                              <td>{p.fecha_inicio_parada?.slice(0, 16).replace("T", " ") || "—"}</td>
-                              <td>{p.fecha_fin_parada?.slice(0, 16).replace("T", " ") || "—"}</td>
+                              <td>{fmtDate(p.fecha_inicio_falla)}</td>
+                              <td>{fmtDate(p.fecha_fin_falla)}</td>
+                              <td>{fmtDate(p.fecha_inicio_parada)}</td>
+                              <td>{fmtDate(p.fecha_fin_parada)}</td>
                               <td>{Number(p.dias_parada).toFixed(2)}</td>
                             </tr>
                           ))}

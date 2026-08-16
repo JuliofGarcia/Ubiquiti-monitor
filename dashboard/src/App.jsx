@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import OverviewPage from "./OverviewPage";
 import SiteDetailPage from "./SiteDetailPage";
 import ReportsPage from "./ReportsPage";
@@ -118,12 +118,12 @@ export default function App() {
         </header>
  
         <div className="page-container">
-          {page === "overview" && <OverviewPage onSiteSelect={handleSiteSelect} role={role} />}
+          {page === "overview" && <OverviewPage onSiteSelect={handleSiteSelect} />}
           {page === "site" && selectedSite && (
-            <SiteDetailPage site={selectedSite} onBack={handleBack} />
+            <SiteDetailPage site={selectedSite} onBack={handleBack} role={role} />
           )}
-           {page === "reports" && <ReportsPage role={role} />}
-           {page === "preventivos" && <PreventivosPage role={role} />}
+           {page === "reports" && <ReportsPage />}
+           {page === "preventivos" && <PreventivosPage />}
            {page === "tickets" && <TicketsPage role={role} />}
            {page === "users" && role === "admin" && <UserManagementPage />}
 

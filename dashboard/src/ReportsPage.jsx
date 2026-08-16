@@ -11,7 +11,6 @@ const PAGE_SIZE = 15;
 export default function ReportsPage() {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [pageZones, setPageZones] = useState(0);
   const [pageSites, setPageSites] = useState(0);
   const [departments, setDepartments] = useState([]);
   const [allJuntas, setAllJuntas] = useState([]);
@@ -70,7 +69,6 @@ export default function ReportsPage() {
  
  
        setData(filteredData);
-       setPageZones(0);
        setPageSites(0);
     } catch (e) {
       console.error("Error fetching report:", e);
@@ -118,9 +116,6 @@ export default function ReportsPage() {
     fetchAllSiteNames();
   }, []);
  
- 
-  const totalZonesPages = Math.ceil(data.length / PAGE_SIZE);
-  const pagedZones = data.slice(pageZones * PAGE_SIZE, (pageZones + 1) * PAGE_SIZE);
  
   const allSites = getAllSites();
   const totalSitesPages = Math.ceil(allSites.length / PAGE_SIZE);
@@ -481,7 +476,7 @@ export default function ReportsPage() {
                   ))}
                   {allSites.length === 0 && (
                     <tr>
-                      <td colSspan="7" style={{ textAlign: "center", padding: "20px", color: "#888" }}>
+                      <td colSpan="10" style={{ textAlign: "center", padding: "20px", color: "#888" }}>
                         No se encontraron juntas con los filtros aplicados
                       </td>
                     </tr>

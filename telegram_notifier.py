@@ -37,6 +37,8 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 API_URL = os.getenv("DASHBOARD_API_URL", "http://dashboard:5000")
 CHECK_INTERVAL = int(os.getenv("TELEGRAM_CHECK_INTERVAL", "300"))
 ALERTS_FILE = "/app/data/telegram_sent_alerts.json"
+# Solo notificar cuando la junta lleve al menos esta cantidad de horas caida
+ALERT_DELAY_HOURS = float(os.getenv("TELEGRAM_ALERT_DELAY_HOURS", "3"))
 
 
 def load_sent_alerts():
@@ -166,20 +168,46 @@ def check_and_notify():
     recovered = []
 
     current_ids = set()
+    now = time.time()
     for a in alerts:
         sid = a.get("site_id", "")
         name = a.get("site_name", sid)
         current_ids.add(sid)
+
+        # Horas de caida reales (desde ultima vez con AP online). Puede ser
+        # numero o "sin registro" si no hay dato historico en InfluxDB.
+        raw_hours = a.get("hours_down", "sin registro")
+        try:
+            hours_down = float(raw_hours)
+        except (TypeError, ValueError):
+            hours_down = None
+
         if sid not in sent:
+            # Primera deteccion: registrar con su tiempo de inicio, sin notificar aun
+            sent[sid] = {"name": name, "time": now, "notified": False}
+        else:
+            sent[sid]["name"] = name
+
+        entry = sent[sid]
+        # Tiempo de caida: usar el real si la API lo entrego; si no, medir
+        # desde la primera deteccion del notificador.
+        if hours_down is not None:
+            elapsed = hours_down
+        else:
+            elapsed = (now - entry.get("time", now)) / 3600.0
+
+        # Unicamente notificar cuando lleve >= ALERT_DELAY_HOURS caida
+        if not entry.get("notified") and elapsed >= ALERT_DELAY_HOURS:
+            entry["notified"] = True
             new_alerts.append(a)
-            sent[sid] = {"name": name, "time": time.time()}
 
     # Detectar sitios recuperados (estaban caidos, ya no)
-    recovered = []
     for sid in list(sent.keys()):
         if sid not in current_ids:
             entry = sent[sid]
-            recovered.append({"site_id": sid, "name": entry.get("name", sid), "down_since": entry.get("time", 0)})
+            if entry.get("notified"):
+                # Solo reportar recuperacion si la caida habia sido notificada
+                recovered.append({"site_id": sid, "name": entry.get("name", sid), "down_since": entry.get("time", 0)})
             del sent[sid]
 
     if new_alerts:

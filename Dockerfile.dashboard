@@ -18,7 +18,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY api.py .
-COPY config.py .
 # base_operacion.xlsx es dato privado (no está en git): se monta por volumen
 # desde el servidor (ver docker-compose).
 COPY --from=build /app/dist /app/dashboard/dist

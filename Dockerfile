@@ -19,9 +19,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY ubiquiti_backend.py .
 COPY config.py .
 
-# Crear directorio de logs
-RUN mkdir -p /app/logs
-
 # Health check (verifica que el proceso siga corriendo)
 HEALTHCHECK --interval=60s --timeout=10s --start-period=60s --retries=3 \
     CMD python -c "import os, requests; requests.get(os.getenv('UBIQUITI_API_URL', 'https://juntasub.inred.com.co/nms/api/v2.1') + '/sites', timeout=10)" || exit 1

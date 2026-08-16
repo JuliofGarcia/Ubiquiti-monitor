@@ -4,7 +4,7 @@ import TrafficChart from "./components/TrafficChart";
 import ActivityChart from "./components/ActivityChart";
 import DevicesTable from "./components/DevicesTable";
 
-export default function SiteDetailPage({ site, onBack }) {
+export default function SiteDetailPage({ site, onBack, role }) {
   const [currentSite, setCurrentSite] = useState(site);
   const [traffic, setTraffic] = useState([]);
   const [activity, setActivity] = useState([]);
@@ -65,6 +65,10 @@ export default function SiteDetailPage({ site, onBack }) {
             <h2>{currentSite.site_name}</h2>
             <div className="site-meta">
                <span>Departamento: {currentSite.department || "—"}</span>
+              <span>Grupo: <span className={`badge ${currentSite.grupo && currentSite.grupo !== "Sin grupo" ? "badge-active" : ""}`}>{currentSite.grupo || "Sin grupo"}</span></span>
+              <span>TK abiertos: {currentSite.tickets_abiertos > 0 ? (
+                <span className="badge badge-inactive">{(currentSite.tickets_num || []).join(", ") || currentSite.tickets_abiertos}</span>
+              ) : "—"}</span>
               <span>Etapa: <span className={`badge ${currentSite.estado === "Operación" ? "badge-active" : ""}`}>{currentSite.estado || "—"}</span></span>
               {currentSite.fecha_inicio && <span>Inicio: {currentSite.fecha_inicio}</span>}
             </div>
@@ -102,9 +106,10 @@ export default function SiteDetailPage({ site, onBack }) {
              Exportar Excel
 
           </button>
-            <button
-              className={`btn-toggle ${currentSite.estado === "Operación" ? "btn-toggle-op" : "btn-toggle-impl"}`}
-              onClick={() => {
+            {role === "admin" && (
+              <button
+                className={`btn-toggle ${currentSite.estado === "Operación" ? "btn-toggle-op" : "btn-toggle-impl"}`}
+                onClick={() => {
                 const code = currentSite.inred_code;
                 if (!code || code === "unknown") {
                   console.error("No se pudo obtener el código de la junta.");
@@ -130,6 +135,7 @@ export default function SiteDetailPage({ site, onBack }) {
             >
              {currentSite.estado === "Operación" ? "Pasar a Implementación" : "Pasar a Operación"}
            </button>
+            )}
         </div>
         </div>
       </div>

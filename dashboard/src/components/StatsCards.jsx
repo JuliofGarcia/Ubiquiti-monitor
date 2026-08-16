@@ -1,4 +1,4 @@
-export default function StatsCards({ stats, loading }) {
+export default function StatsCards({ stats, loading, hogaresBajosCount = null }) {
   const cards = [
     {
       label: "Juntas: Todas Online",
@@ -20,6 +20,13 @@ export default function StatsCards({ stats, loading }) {
       total: stats?.sites_total ?? "-",
       color: "var(--red)",
       icon: "▼",
+    },
+    {
+      label: "Operación: Juntas <33% Hogares",
+      value: hogaresBajosCount ?? "-",
+      total: stats?.ops_total ?? "-",
+      color: "var(--red)",
+      icon: "●",
     },
     {
       label: "Operación: Todas Online",

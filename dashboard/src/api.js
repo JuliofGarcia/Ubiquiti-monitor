@@ -11,7 +11,7 @@ async function request(url, options = {}) {
     headers["Content-Type"] = "application/json";
   }
 
-  const res = await fetch(`${API_BASE}${url}`, { ...options, headers });
+  const res = await fetch(`${API_BASE}${url}`, { ...options, headers, cache: "no-store" });
   if (res.status === 401) {
     localStorage.removeItem("token");
     window.location.reload();
@@ -94,6 +94,15 @@ export async function fetchReport(params = {}) {
     if (v && v !== "all") query.set(k, v);
   });
   const res = await request(`/report?${query}`);
+  return res.json();
+}
+
+export async function fetchHogaresBajos(params = {}) {
+  const query = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => {
+    if (v && v !== "all") query.set(k, v);
+  });
+  const res = await request(`/hogares-bajos?${query}`);
   return res.json();
 }
 

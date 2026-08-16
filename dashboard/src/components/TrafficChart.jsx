@@ -11,11 +11,11 @@ import {
 } from "recharts";
  
 const RANGES = [
-  { label: "1h", value: "1h", hours: 1 },
-  { label: "6h", value: "6h", hours: 6 },
-  { label: "24h", value: "24h", hours: 24 },
-  { label: "7d", value: "168h", hours: 168 },
-  { label: "30d", value: "720h", hours: 720 },
+  { label: "1h", value: "1h" },
+  { label: "6h", value: "6h" },
+  { label: "24h", value: "24h" },
+  { label: "7d", value: "168h" },
+  { label: "30d", value: "720h" },
 ];
  
 const CustomTooltip = ({ active, payload, label }) => {
@@ -27,7 +27,7 @@ const CustomTooltip = ({ active, payload, label }) => {
           {payload.map((entry, index) => (
             <div key={index} style={{ color: entry.color }}>
               <span className="tooltip-name">{entry.name}: </span>
-              <span className="tooltip-value">{Number(entry.value).toFixed(2)} GB</span>
+              <span className="tooltip-value">{Number(entry.value).toFixed(2)} Mbps</span>
             </div>
           ))}
         </div>
@@ -47,8 +47,8 @@ export default function TrafficChart({ data, range, onRangeChange, loading, titl
  
   const scaled = data.map((d) => ({
     ...d,
-    download: Number((d.download * 1000).toFixed(4)),
-    upload: Number((d.upload * 1000).toFixed(4)),
+    download: Number((d.download / 1e6).toFixed(4)),
+    upload: Number((d.upload / 1e6).toFixed(4)),
   }));
  
   const applyCustomRange = () => {

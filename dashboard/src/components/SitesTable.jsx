@@ -30,6 +30,27 @@ export default function SitesTable({ sites, onSelect, loading }) {
     return <span className="badge">—</span>;
   };
 
+  const getGrupoBadge = (site) => {
+    const g = site.grupo || "";
+    if (g && g !== "Sin grupo") {
+      return <span className="badge badge-active">{g}</span>;
+    }
+    return <span className="badge">—</span>;
+  };
+
+  const getTicketBadge = (site) => {
+    const count = site.tickets_abiertos || 0;
+    if (count > 0) {
+      const nums = (site.tickets_num || []).join(", ");
+      return (
+        <span className="badge badge-inactive" title={`Tickets abiertos: ${nums}`}>
+          TK {count}{nums ? ` · ${nums}` : ""}
+        </span>
+      );
+    }
+    return <span className="badge">—</span>;
+  };
+
   const downloadExcel = (e, siteId) => {
     e.stopPropagation();
     const token = localStorage.getItem("token");
@@ -81,6 +102,8 @@ export default function SitesTable({ sites, onSelect, loading }) {
                <tr>
                  <th>Nombre</th>
                   <th>Departamento</th>
+                 <th>Grupo</th>
+                 <th>TK</th>
                  <th>Estado</th>
                  <th>Etapa</th>
                  <th>Est. APs</th>
@@ -100,8 +123,10 @@ export default function SitesTable({ sites, onSelect, loading }) {
                   <td title={site.site_id}>
                     {site.site_name}
                     {site.fecha_inicio && <small style={{ color: "var(--text-muted)", marginLeft: 6 }}>{site.fecha_inicio}</small>}
-                  </td>
-                   <td>{site.department || "—"}</td>
+                   </td>
+                    <td>{site.department || "—"}</td>
+                  <td>{getGrupoBadge(site)}</td>
+                  <td>{getTicketBadge(site)}</td>
                   <td>{getStatusBadge(site)}</td>
                   <td>
                     <span className={site.estado === "Operación" ? "badge badge-active" : "badge"}>
@@ -109,9 +134,9 @@ export default function SitesTable({ sites, onSelect, loading }) {
                     </span>
                   </td>
                   <td>{getHealthBadge(site)}</td>
-                  <td>{site.device_count}</td>
-                  <td>{site.devices_available}</td>
-                   <td>{site.device_outage_count}</td>
+                  <td>{site.lb5_count ?? site.device_count}</td>
+                  <td>{site.lb5_online ?? site.devices_available}</td>
+                  <td>{(site.lb5_count ?? site.device_count) - (site.lb5_online ?? site.devices_available)}</td>
                    <td>
                      <button 
                        className="btn-refresh" 

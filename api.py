@@ -1,4 +1,4 @@
-import os
+﻿import os
 import sys
 import json
 import re
@@ -10,10 +10,12 @@ from influxdb import InfluxDBClient
 from dotenv import load_dotenv
 import pytz
 import jwt
+import hmac
 from functools import wraps
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill
 from io import BytesIO
+from werkzeug.security import generate_password_hash, check_password_hash
 
 load_dotenv()
 
@@ -23,7 +25,35 @@ logging.basicConfig(level=logging.INFO)
 app = Flask(__name__, static_folder="dashboard/dist", static_url_path="")
 CORS(app)
 
-SECRET_KEY = os.getenv("SECRET_KEY", "fallback-secret-key")
+# SECRET_KEY es obligatoria: sin ella la app no arranca (evita el token JWT forjable).
+# Genera una con: python -c "import secrets; print(secrets.token_hex(32))"
+SECRET_KEY = os.getenv("SECRET_KEY", "")
+if not SECRET_KEY:
+    raise RuntimeError(
+        "SECRET_KEY no estÃ¡ configurada en .env. "
+        "Genera una con: python -c \"import secrets; print(secrets.token_hex(32))\""
+    )
+
+
+def hash_password(password: str) -> str:
+    """Genera hash seguro (pbkdf2 con salt aleatorio)."""
+    return generate_password_hash(password)
+
+
+def verify_password(stored: str, password: str):
+    """Verifica la contraseÃ±a contra lo almacenado.
+    Retorna (ok, migrar_legacy): si almacenada en claro hay que re-guardarla hasheada.
+    """
+    if not stored or not isinstance(stored, str):
+        return False, False
+    try:
+        if check_password_hash(stored, password):
+            return True, False
+    except Exception:
+        pass  # formato viejo (texto plano) -> se valida abajo
+    if hmac.compare_digest(stored, password or ""):
+        return True, True  # legacy en claro, migrar a hash
+    return False, False
 
 def token_required(f):
     @wraps(f)
@@ -57,9 +87,17 @@ INFLUX_PORT = int(os.getenv("INFLUXDB_PORT", 8086))
 INFLUX_USER = os.getenv("INFLUXDB_ADMIN_USER", "admin")
 INFLUX_PASSWORD = os.getenv("INFLUXDB_ADMIN_PASSWORD", "password")
 INFLUX_DATABASE = os.getenv("INFLUXDB_DATABASE", "monitoreo")
+INFLUX_RETENTION_DAYS = int(os.getenv("INFLUXDB_RETENTION_DAYS", "90"))
+TRAFFIC_MEASUREMENT = f'"traffic_{INFLUX_RETENTION_DAYS}d"."traffic"'
 
 # Modelos que son APs/infraestructura, no clientes finales
 AP_MODELS = {"R5AC-Lite", "R5AC-Lite-2", "LAP-120", "LAP-GPS", "PBE-5AC", "PBE-M5", "NBE-5AC", "NBE-M5"}
+
+# Nombres de mes en inglÃ©s (strftime %b) -> abreviatura en espaÃ±ol
+MONTH_MAP = {
+    "jan": "ene", "feb": "feb", "mar": "mar", "apr": "abr", "may": "may", "jun": "jun",
+    "jul": "jul", "aug": "ago", "sep": "sep", "oct": "oct", "nov": "nov", "dec": "dic",
+}
 
 
 def get_influx_client():
@@ -69,13 +107,16 @@ def get_influx_client():
         username=INFLUX_USER,
         password=INFLUX_PASSWORD,
         database=INFLUX_DATABASE,
-        timeout=10,
+        timeout=30,
     )
 
 
 def query_latest_sites(client):
-    """Obtiene el ultimo punto de cada site sin perder tags"""
-    result = client.query("SELECT * FROM sites ORDER BY time DESC")
+    """Obtiene el ultimo punto de cada site sin perder tags.
+    El backend escribe cada 5 min, asi que el ultimo punto de cada serie
+    siempre cae dentro de esta ventana; acotar por tiempo evita escanear
+    todo el historico (retencion infinita) y los timeouts de lectura."""
+    result = client.query("SELECT * FROM sites WHERE time > now() - 24h ORDER BY time DESC")
     latest = {}
     if result and "series" in getattr(result, "raw", {}):
         for series in result.raw["series"]:
@@ -85,7 +126,7 @@ def query_latest_sites(client):
                 row = tags.copy()
                 for col, val in zip(columns, values):
                     if col == "time":
-                        # InfluxDB raw devuelve nanosegundos → convertir a ISO string
+                        # InfluxDB raw devuelve nanosegundos â†’ convertir a ISO string
                         if isinstance(val, (int, float)):
                             from datetime import datetime, timezone
                             row["time"] = datetime.fromtimestamp(val / 1e9, tz=timezone.utc).isoformat()
@@ -101,14 +142,43 @@ def query_latest_sites(client):
                     if not ls or ls == 0 or not str(ls).strip():
                         row["last_seen"] = ""
                     latest[sid] = row
+
+    # La fecha real de Ãºltima conexiÃ³n de cada junta: el device con lastSeen mÃ¡s
+    # reciente de ese sitio (la API no expone lastSeen en el overview de /sites).
+    _enrich_site_last_seen(client, latest)
     return list(latest.values())
 
 
+def _enrich_site_last_seen(client, sites_map):
+    """Completa last_seen de cada site con el Ãºltimo last_seen de sus devices."""
+    try:
+        dev_res = client.query("SELECT last_seen FROM devices WHERE time > now() - 24h GROUP BY site_id ORDER BY time DESC LIMIT 1")
+        if not dev_res or "series" not in getattr(dev_res, "raw", {}):
+            return
+        for series in dev_res.raw["series"]:
+            sid = (series.get("tags") or {}).get("site_id", "")
+            site = sites_map.get(sid)
+            if not site or site.get("last_seen"):
+                continue
+            values = series.get("values") or []
+            if not values:
+                continue
+            col_idx = series["columns"].index("last_seen")
+            ls = values[0][col_idx]
+            if ls and str(ls).strip() and str(ls) != "0":
+                site["last_seen"] = str(ls)
+    except Exception as e:
+        logger.warning(f"No se pudo enriquecer last_seen desde devices: {e}")
+
+
 def query_latest_devices(client):
-    """Obtiene el ultimo punto de cada device sin perder tags."""
+    """Obtiene el ultimo punto de cada device sin perder tags.
+    El backend escribe cada 5 min, asi que el ultimo punto de cada serie
+    siempre cae dentro de esta ventana; acotar por tiempo evita escanear
+    todo el historico (retencion infinita) y los timeouts de lectura."""
     # Usamos SELECT * para obtener todos los campos originales sin el prefijo last_
-    # Limitado para rendimiento, agrupado por device_id
-    result = client.query("SELECT * FROM devices GROUP BY device_id ORDER BY time DESC LIMIT 1")
+    # Limitado por ventana de tiempo para rendimiento, agrupado por device_id
+    result = client.query("SELECT * FROM devices WHERE time > now() - 24h GROUP BY device_id ORDER BY time DESC LIMIT 1")
     latest = []
     if result and "series" in getattr(result, "raw", {}):
         for series in result.raw["series"]:
@@ -116,7 +186,29 @@ def query_latest_devices(client):
             values = series.get("values", [])[0]
             row = dict(zip(columns, values))
             
-            # Asegurar que el ID venga de los tags si no está en columns
+            # Asegurar que el ID venga de los tags si no estÃ¡ en columns
+            tags = series.get("tags", {})
+            if "device_id" not in row or row["device_id"] is None:
+                row["device_id"] = tags.get("device_id")
+            if "site_id" not in row or row["site_id"] is None:
+                row["site_id"] = tags.get("site_id")
+            latest.append(row)
+    return latest
+
+
+def query_site_devices_full(client, site_id):
+    """Ultimo punto de CADA device del sitio en todo el historico (retencion
+    infinita). La ventana de 24h oculta devices caidos hace mas tiempo, ya que
+    el backend los escribe con timestamp = last_seen (fecha vieja)."""
+    result = client.query(
+        f"SELECT * FROM devices WHERE site_id = '{site_id}' GROUP BY device_id ORDER BY time DESC LIMIT 1"
+    )
+    latest = []
+    if result and "series" in getattr(result, "raw", {}):
+        for series in result.raw["series"]:
+            columns = series["columns"]
+            values = series.get("values", [])[0]
+            row = dict(zip(columns, values))
             tags = series.get("tags", {})
             if "device_id" not in row or row["device_id"] is None:
                 row["device_id"] = tags.get("device_id")
@@ -148,6 +240,19 @@ def get_site_health(site):
     if ap_online >= ap_total:
         return "total_online"
     return "parcial"
+
+
+def get_site_clients(site):
+    """Clientes (hogares) de un site EXCLUYENDO los APs.
+    El device_count de la API incluye los APs (66 = 64 clientes + 2 APs).
+    Prioriza el conteo real de LB5 del backend; si no hay LB5 registrados,
+    cae a device_count - ap_count."""
+    lb5_total = int(site.get("lb5_count", 0) or 0)
+    if lb5_total > 0:
+        return lb5_total, int(site.get("lb5_online", 0) or 0)
+    total = max(0, int(site.get("device_count", 0) or 0) - int(site.get("ap_count", 0) or 0))
+    online = max(0, int(site.get("devices_available", 0) or 0) - int(site.get("ap_online", 0) or 0))
+    return total, online
 
 
 def get_override_estado(overrides, code):
@@ -183,9 +288,18 @@ def login():
     users = load_users()
     user = users.get(username)
     
-    if not user or user.get("password") != password:
-        return jsonify({"error": "Credenciales inválidas"}), 401
-    
+    if not user:
+        return jsonify({"error": "Credenciales invÃ¡lidas"}), 401
+
+    ok, migrate = verify_password(user.get("password"), password)
+    if not ok:
+        return jsonify({"error": "Credenciales invÃ¡lidas"}), 401
+
+    # Migrar contraseÃ±a en claro (formato legacy) a hash
+    if migrate:
+        users[username]["password"] = hash_password(password)
+        save_users(users)
+
     token = jwt.encode({
         "user": username, 
         "role": user.get("role", "viewer"), 
@@ -218,21 +332,14 @@ def stats():
 
         ops_total = 0
         ops_online = 0
-        non_ops_debug = []
         for s in sites:
             code_match = re.match(r"^(\d+)", s.get("site_name", "").strip())
             code = code_match.group(1) if code_match else ""
             estado = (get_override_estado(overrides, code) or s.get("estado", "") or "").strip()
-            if estado.lower() == "operación":
+            if estado.lower() == "operaciÃ³n":
                 ops_total += 1
                 if is_site_online(s):
                     ops_online += 1
-            else:
-                non_ops_debug.append(f"{s.get('site_name')} | {estado}")
-        
-        logger.info(f"Stats calculation: total_sites={len(sites)}, ops_total={ops_total}")
-        if len(sites) - ops_total > 48: # Expecting 146 - 98 = 48 non-ops
-            logger.info(f"Unexpected non-ops count: {len(sites) - ops_total}. Examples: {non_ops_debug[:5]}")
 
         total_clients = len(devices)
         clients_online = sum(1 for d in devices if str(d.get("status", "")).lower() == "active")
@@ -254,8 +361,8 @@ def stats():
                 "clients_online": clients_online,
                 "clients_offline": clients_offline,
                 "clients_total": total_clients,
-                "total_download_mbps": round(total_download, 2),
-                "total_upload_mbps": round(total_upload, 2),
+                "total_download_mbps": round(total_download / 1e6, 2),
+                "total_upload_mbps": round(total_upload / 1e6, 2),
                 "avg_sla": round(avg_sla, 2),
             }
         )
@@ -269,25 +376,34 @@ def stats():
 @app.route("/api/sites")
 @token_required
 def sites_list():
-    """Lista de APs con filtros: department, status, search, estado, health"""
+    """Lista de APs con filtros: department, status, search, estado, health, grupo"""
     department = request.args.get("department")
     status = request.args.get("status")
     search = request.args.get("search", "").lower()
     estado = request.args.get("estado")
     health = request.args.get("health")
+    grupo = request.args.get("grupo")
     
     client = get_influx_client()
     try:
         sites = query_latest_sites(client)
         sites = [s for s in sites if s.get("department") and s.get("department") not in ["unknown", "TPT"]]
 
+        # CÃ³digos de juntas con ticket abierto (del Excel de tickets)
+        open_by_code = get_tickets_open_map()
+
         # Aplicar overrides de estado
         overrides = load_estado_overrides()
         for s in sites:
             s["online"] = is_site_online(s)
+            s["grupo"] = s.get("grupo") or "Sin grupo"
             code_match = re.match(r"^(\d+)", s.get("site_name", ""))
+            code = code_match.group(1) if code_match else ""
+            tids = open_by_code.get(code, []) if code else []
+            s["ticket_abierto"] = len(tids) > 0
+            s["tickets_abiertos"] = len(tids)
+            s["tickets_num"] = tids
             if code_match:
-                code = code_match.group(1)
                 if code in overrides:
                     s["estado"] = get_override_estado(overrides, code)
                 # Health basado en APs (Rocket 5AC Lite)
@@ -312,6 +428,8 @@ def sites_list():
             sites = [s for s in sites if s.get("estado", "") == estado]
         if health and health != "all":
             sites = [s for s in sites if s.get("health") == health]
+        if grupo:
+            sites = [s for s in sites if s.get("grupo", "").lower() == grupo.lower()]
 
         return jsonify(sites)
     except Exception as e:
@@ -348,7 +466,7 @@ def traffic():
         query = f"""
             SELECT SUM(download_capacity) AS download,
                    SUM(upload_capacity) AS upload
-            FROM sites
+            FROM {TRAFFIC_MEASUREMENT}
             WHERE {time_filter} {site_filter} {dept_filter} {estado_filter}
             GROUP BY TIME(5m)
         """
@@ -384,12 +502,11 @@ def devices_list():
     
     client = get_influx_client()
     try:
-        devices = query_latest_devices(client)
-        
         if site_id:
-            # Filtro robusto: convertir ambos a cadena para asegurar coincidencia
-            devices = [d for d in devices if str(d.get("site_id")) == str(site_id)]
-            
+            devices = query_site_devices_full(client, site_id)
+        else:
+            devices = query_latest_devices(client)
+        
         if status:
             devices = [
                 d for d in devices if str(d.get("status", "")).lower() == status.lower()
@@ -512,7 +629,9 @@ def site_devices():
     try:
         # Query all devices for the site. Since site_id is a field, we filter here.
         # We order by time DESC to get the most recent points first.
-        query = f"SELECT * FROM devices WHERE site_id = '{site_id}' ORDER BY time DESC"
+        # Acotado a ultimas 24h: el backend escribe cada 5 min, el ultimo punto
+        # de cada device siempre cae dentro de esta ventana.
+        query = f"SELECT * FROM devices WHERE site_id = '{site_id}' AND time > now() - 24h ORDER BY time DESC"
         result = client.query(query)
         
         latest = {}
@@ -546,6 +665,35 @@ def site_devices():
                 if is_online:
                     ap_online += 1
 
+        # Fallback para sitios caÃ­dos hace >24h: la ventana de devices ya no los
+        # incluye, por lo que subestima el total. El conteo real de hogares sale
+        # de la mediciÃ³n sites (lb5_count del backend).
+        homes_site = lb5_total
+        aps_site = ap_total
+        try:
+            site_res = client.query(
+                f"SELECT * FROM sites WHERE site_id = '{site_id}' ORDER BY time DESC LIMIT 1"
+            )
+            if site_res and "series" in getattr(site_res, "raw", {}):
+                for series in site_res.raw["series"]:
+                    columns = series["columns"]
+                    for values in series.get("values", []):
+                        row = dict(zip(columns, values))
+                        lb5c = int(row.get("lb5_count") or 0)
+                        apc = int(row.get("ap_count") or 0)
+                        if lb5c:
+                            homes_site = lb5c
+                        else:
+                            dc = int(row.get("device_count") or 0)
+                            homes_site = max(0, dc - apc)
+                        aps_site = apc
+                        break
+        except Exception:
+            pass
+
+        lb5_total = max(lb5_total, homes_site)
+        ap_total = max(ap_total, aps_site)
+
         return jsonify(
             {
                 "site_id": site_id,
@@ -564,6 +712,95 @@ def site_devices():
         client.close()
 
 
+@app.route("/api/hogares-bajos")
+@token_required
+def hogares_bajos():
+    """Juntas en OPERACIÃ“N con menos del X% de hogares conectados (LB5 online/total).
+    Filtros: pct (default 33), department (opcional)."""
+    try:
+        pct = float(request.args.get("pct", "33"))
+    except ValueError:
+        pct = 33.0
+    department = request.args.get("department")
+
+    client = get_influx_client()
+    try:
+        sites = query_latest_sites(client)
+        overrides = load_estado_overrides()
+        open_by_code = get_tickets_open_map()
+
+        meta = {}
+        for s in sites:
+            code_match = re.match(r"^(\d+)", s.get("site_name", ""))
+            code = code_match.group(1) if code_match else ""
+            estado = get_override_estado(overrides, code) or s.get("estado", "")
+            if estado != "OperaciÃ³n":
+                continue
+            dept = s.get("department") or ""
+            if dept in ("unknown", "TPT"):
+                continue
+            if department and department.lower() not in dept.lower():
+                continue
+            meta[s.get("site_id", "")] = {
+                "site_id": s.get("site_id", ""),
+                "site_name": s.get("site_name", ""),
+                "department": dept,
+                "last_online": s.get("last_seen") or "",
+                "grupo": s.get("grupo") or "Sin grupo",
+                "tickets_num": list(open_by_code.get(code, [])),
+                "homes_site": int(s.get("lb5_count", 0) or 0) or max(
+                    0,
+                    int(s.get("device_count", 0) or 0) - int(s.get("ap_count", 0) or 0),
+                ),
+            }
+
+        # Contar LB5 por sitio en una sola pasada (un query ya cacheado por device)
+        devices = query_latest_devices(client)
+        lb5_by_site = {}
+        for d in devices:
+            model = str(d.get("device_model", "")).strip()
+            if model != "LB5":
+                continue
+            sid = d.get("site_id", "")
+            if sid not in meta:
+                continue
+            st = str(d.get("status", "")).lower()
+            info = lb5_by_site.setdefault(sid, {"total": 0, "online": 0})
+            info["total"] += 1
+            if st == "active":
+                info["online"] += 1
+
+        result = []
+        for sid, m in meta.items():
+            # Total de hogares = instalados/asignados al site (device_count - ap_count),
+            # sin subestimar por la ventana de 24h de devices (juntas caÃ­das dejan de reportar).
+            total = max(
+                lb5_by_site.get(sid, {}).get("total", 0),
+                m.get("homes_site", 0),
+            )
+            online = lb5_by_site.get(sid, {}).get("online", 0)
+            if total == 0:
+                continue
+            pct_online = round(online / total * 100, 1)
+            if pct_online < pct:
+                result.append({
+                    **m,
+                    "hogares_total": total,
+                    "hogares_online": online,
+                    "hogares_offline": total - online,
+                    "pct_online": pct_online,
+                    "ths": 33,
+                })
+
+        result.sort(key=lambda r: r["pct_online"])
+        return jsonify(result)
+    except Exception as e:
+        logger.exception("Error en /api/hogares-bajos")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        client.close()
+
+
 @app.route("/api/alerts")
 @token_required
 def alerts():
@@ -573,11 +810,12 @@ def alerts():
         sites = query_latest_sites(client)
         offline_sites = []
         overrides = load_estado_overrides()
+        open_by_code = get_tickets_open_map()
         for s in sites:
             code_match = re.match(r"^(\d+)", s.get("site_name", ""))
             code = code_match.group(1) if code_match else ""
             estado = get_override_estado(overrides, code) or s.get("estado", "")
-            if estado != "Operación":
+            if estado != "OperaciÃ³n":
                 continue
             ap_total = s.get("ap_count", 0)
             ap_online = s.get("ap_online", 0)
@@ -608,8 +846,15 @@ def alerts():
                         "device_count": s.get("device_count", 0),
                         "estado": estado,
                         "fecha_inicio": s.get("fecha_inicio", ""),
-                        "last_online": last_online or "",
+                        # Fecha real de Ãºltima conexiÃ³n: preferir el last_seen real
+                        # del site (Ãºltimo device), fallback a la Ãºltima vez con APs online.
+                        "last_online": s.get("last_seen") or last_online or "",
                         "hours_down": hours_down if hours_down is not None else "sin registro",
+                        "grupo": s.get("grupo") or "Sin grupo",
+                        # Info de tickets abiertos de la junta (para el modal)
+                        "ticket_abierto": len(open_by_code.get(code, [])) > 0,
+                        "tickets_abiertos": len(open_by_code.get(code, [])),
+                        "tickets_num": open_by_code.get(code, []),
                     }
                 )
         return jsonify(offline_sites)
@@ -623,7 +868,7 @@ def alerts():
 @app.route("/api/report")
 @token_required
 def report():
-    """Reporte avanzado con estados de salud y filtros de operación"""
+    """Reporte avanzado con estados de salud y filtros de operaciÃ³n"""
     dept_filter = request.args.get("department")
     type_filter = request.args.get("type") # 'operacion', 'implementacion', 'all'
     health_filter = request.args.get("health") # 'total_online', 'parcial', 'total_caida', 'all'
@@ -646,14 +891,13 @@ def report():
             if dept in ["unknown", "TPT"]:
                 continue
             
-            # --- Lógica de Salud del Sitio (Basada en APs/Rocket) ---
-            total_dev = s.get("device_count", 0)
-            outage_dev = s.get("device_outage_count", 0)
+            # --- LÃ³gica de Salud del Sitio (Basada en APs/Rocket) ---
+            clients_total, clients_online = get_site_clients(s)
             health_status = get_site_health(s)
             is_active = health_status != "total_caida" and health_status != "unknown"
             
-            # --- Lógica de Estado Operativo ---
-            op_status = s.get("estado", "Implementación").lower()
+            # --- LÃ³gica de Estado Operativo ---
+            op_status = s.get("estado", "ImplementaciÃ³n").lower()
             
             # Aplicar Filtros
             if dept_filter and dept_filter.lower() not in dept.lower():
@@ -661,14 +905,14 @@ def report():
             if search_filter and search_filter not in s.get("site_name", "").lower():
                 continue
             
-            # Filtro de Tipo (Operación / Implementación)
+            # Filtro de Tipo (OperaciÃ³n / ImplementaciÃ³n)
             if type_filter and type_filter != "all":
-                if type_filter == "operacion" and op_status != "operación":
+                if type_filter == "operacion" and op_status != "operaciÃ³n":
                     continue
-                if type_filter == "implementacion" and op_status != "implementación":
+                if type_filter == "implementacion" and op_status != "implementaciÃ³n":
                     continue
 
-            # Filtro de Salud (Online / Parcial / Caída)
+            # Filtro de Salud (Online / Parcial / CaÃ­da)
             if health_filter and health_filter != "all":
                 if health_filter == "total_online" and health_status != "total_online":
                     continue
@@ -694,8 +938,8 @@ def report():
             if is_active:
                 depts[key]["sites_online"] += 1
             
-            depts[key]["total_clients"] += total_dev
-            depts[key]["clients_online"] += s.get("devices_available", 0)
+            depts[key]["total_clients"] += clients_total
+            depts[key]["clients_online"] += clients_online
             
             last_seen_val = ""
             if s.get("last_seen"):
@@ -708,14 +952,15 @@ def report():
                     "name": s.get("site_name", ""),
                     "status": s.get("status", ""),
                     "health": health_status,
-                    "op_status": s.get("estado", "Implementación"),
+                    "op_status": s.get("estado", "ImplementaciÃ³n"),
                     "online": health_status == "total_online",
-                    "clients": total_dev,
-                    "clients_online": s.get("devices_available", 0),
+                    "grupo": s.get("grupo") or "Sin grupo",
+                    "clients": clients_total,
+                    "clients_online": clients_online,
                     "ap_total": s.get("ap_count", 0),
                     "ap_online": s.get("ap_online", 0),
-                    "download": round(s.get("download_capacity", 0), 4),
-                    "upload": round(s.get("upload_capacity", 0), 4),
+                    "download": round(s.get("download_capacity", 0) / 1e6, 4),
+                    "upload": round(s.get("upload_capacity", 0) / 1e6, 4),
                     "last_seen": last_seen_val,
                     "lat": s.get("latitude", 0),
                     "lon": s.get("longitude", 0),
@@ -762,9 +1007,10 @@ def report_excel_detailed():
         center_alignment = Alignment(horizontal="center")
         
         headers = [
-            "Junta", "Departamento", "Estado Salud", "Etapa Operativa", 
+            "Junta", "Departamento", "Grupo", "TK Abiertos", 
+            "Estado Salud", "Etapa Operativa", 
             "APs Totales", "APs Online", "Disponibilidad", "APs Offline", 
-            "Clientes Totales", "Clientes Online", "Descarga (Mbps)", "Carga (Mbps)", "Última Conexión"
+            "Clientes Totales", "Clientes Online", "Descarga (Mbps)", "Carga (Mbps)"
         ]
         ws.append(headers)
         
@@ -773,15 +1019,18 @@ def report_excel_detailed():
             cell.font = header_font
             cell.fill = header_fill
             cell.alignment = center_alignment
-            
+
+        open_by_code = get_tickets_open_map()
+
+        included_sites = []
         for s in sites:
             dept = s.get("department") or "unknown"
             if dept in ["unknown", "TPT"]:
                 continue
             
-            total_dev = s.get("device_count", 0)
+            clients_total, clients_online = get_site_clients(s)
             health_status = get_site_health(s)
-            op_status = s.get("estado", "Implementación")
+            op_status = s.get("estado", "ImplementaciÃ³n")
             ap_total = s.get("ap_count", 0)
             ap_online = s.get("ap_online", 0)
             
@@ -789,40 +1038,151 @@ def report_excel_detailed():
             if dept_filter and dept_filter.lower() not in dept.lower(): continue
             if search_filter and search_filter not in s.get("site_name", "").lower(): continue
             if type_filter and type_filter != "all":
-                if type_filter == "operacion" and op_status.lower() != "operación": continue
-                if type_filter == "implementacion" and op_status.lower() != "implementación": continue
+                if type_filter == "operacion" and op_status.lower() != "operaciÃ³n": continue
+                if type_filter == "implementacion" and op_status.lower() != "implementaciÃ³n": continue
             if health_filter and health_filter != "all":
                 if health_filter == "total_online" and health_status != "total_online": continue
                 if health_filter == "parcial" and health_status != "parcial": continue
                 if health_filter == "total_caida" and health_status != "total_caida": continue
                 
-            # Formatear fecha — preferir last_seen field, fallback a InfluxDB time
-            last_seen = s.get("last_seen") or s.get("time")
-            if last_seen:
-                try:
-                    dt = datetime.datetime.fromisoformat(last_seen.replace("Z", "+00:00"))
-                    bogota_tz = pytz.timezone('America/Bogota')
-                    last_seen_fmt = dt.astimezone(bogota_tz).strftime("%d/%m/%Y %H:%M:%S")
-                except:
-                    last_seen_fmt = str(last_seen)
-            else:
-                last_seen_fmt = "N/A"
+            # Grupo y tickets abiertos de la junta
+            code_match = re.match(r"^(\d+)", s.get("site_name", ""))
+            code = code_match.group(1) if code_match else ""
+            tids = open_by_code.get(code, []) if code else []
+            tk_fmt = f"{len(tids)} Â· {', '.join(tids)}" if tids else "0"
 
             ws.append([
                 s.get("site_name", ""),
                 dept,
+                s.get("grupo") or "Sin grupo",
+                tk_fmt,
                 health_status,
                 op_status,
                 ap_total,
                 ap_online,
                 f"{round((ap_online / ap_total * 100), 0)}%" if ap_total > 0 else "0%",
                 ap_total - ap_online,
-                total_dev,
-                s.get("devices_available", 0),
-                round(s.get("download_capacity", 0), 4),
-                round(s.get("upload_capacity", 0), 4),
-                last_seen_fmt
+                clients_total,
+                clients_online,
+                round(s.get("download_capacity", 0) / 1e6, 4),
+                round(s.get("upload_capacity", 0) / 1e6, 4)
             ])
+            included_sites.append(s)
+
+        # Hoja 2: APs de las juntas filtradas
+        ws_aps = wb.create_sheet("APs")
+        headers_aps = ["Junta", "Departamento", "Grupo", "Estado Salud", "AP Name", "Model", "Status", "IP", "MAC", "Signal", "Download", "Upload", "Last Connection"]
+        ws_aps.append(headers_aps)
+        for cell in ws_aps[1]:
+            cell.font = header_font
+            cell.fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
+            cell.alignment = center_alignment
+
+        included_ids = {s.get("site_id") for s in included_sites}
+
+        # Mapa site_id -> site (para nombre, dept, grupo, estado)
+        site_by_id = {s.get("site_id"): s for s in included_sites}
+
+        # HistÃ³rico completo por junta (incluye devices caÃ­dos hace >24h)
+        all_devices = []
+        for sid in included_ids:
+            all_devices.extend(query_site_devices_full(client, sid))
+
+        ap_rows = []
+        for d in all_devices:
+            sid = str(d.get("site_id", ""))
+            if sid not in included_ids:
+                continue
+            if str(d.get("device_model", "")).strip() not in AP_MODELS:
+                continue
+            site = site_by_id[sid]
+            last_conn = d.get("last_seen") or d.get("time")
+            if last_conn:
+                try:
+                    dt = datetime.datetime.fromisoformat(str(last_conn).replace("Z", "+00:00"))
+                    bogota_tz = pytz.timezone('America/Bogota')
+                    last_conn_fmt = dt.astimezone(bogota_tz).strftime("%d/%m/%Y %H:%M:%S")
+                except:
+                    last_conn_fmt = str(last_conn)
+            else:
+                last_conn_fmt = "N/A"
+            ap_rows.append([
+                site.get("site_name", ""),
+                site.get("department", ""),
+                site.get("grupo") or "Sin grupo",
+                get_site_health(site),
+                d.get("device_name"),
+                d.get("device_model"),
+                d.get("status"),
+                d.get("ip_address"),
+                d.get("mac_address"),
+                d.get("signal_strength"),
+                d.get("rx_throughput"),
+                d.get("tx_throughput"),
+                last_conn_fmt
+            ])
+
+        ap_rows.sort(key=lambda r: (str(r[0] or ""), str(r[4] or "")))
+        for row in ap_rows:
+            ws_aps.append(row)
+
+        # Hoja 3: Hogares (LB5) de las juntas filtradas
+        ws_hog = wb.create_sheet("Hogares")
+        headers_hog = ["Junta", "Departamento", "Grupo", "Estado Salud", "Hogar Name", "Model", "Status", "IP", "MAC", "Signal", "Download", "Upload", "Last Connection"]
+        ws_hog.append(headers_hog)
+        for cell in ws_hog[1]:
+            cell.font = header_font
+            cell.fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
+            cell.alignment = center_alignment
+
+        hog_rows = []
+        for d in all_devices:
+            sid = str(d.get("site_id", ""))
+            if sid not in included_ids:
+                continue
+            if str(d.get("device_model", "")).strip() != "LB5":
+                continue
+            site = site_by_id[sid]
+            last_conn = d.get("last_seen") or d.get("time")
+            if last_conn:
+                try:
+                    dt = datetime.datetime.fromisoformat(str(last_conn).replace("Z", "+00:00"))
+                    bogota_tz = pytz.timezone('America/Bogota')
+                    last_conn_fmt = dt.astimezone(bogota_tz).strftime("%d/%m/%Y %H:%M:%S")
+                except:
+                    last_conn_fmt = str(last_conn)
+            else:
+                last_conn_fmt = "N/A"
+            hog_rows.append([
+                site.get("site_name", ""),
+                site.get("department", ""),
+                site.get("grupo") or "Sin grupo",
+                get_site_health(site),
+                d.get("device_name"),
+                d.get("device_model"),
+                d.get("status"),
+                d.get("ip_address"),
+                d.get("mac_address"),
+                d.get("signal_strength"),
+                d.get("rx_throughput"),
+                d.get("tx_throughput"),
+                last_conn_fmt
+            ])
+
+        hog_rows.sort(key=lambda r: (str(r[0] or ""), str(r[4] or "")))
+        for row in hog_rows:
+            ws_hog.append(row)
+
+        # Auto-ancho hoja Hogares
+        for col in ws_hog.columns:
+            max_length = 0
+            column = col[0].column_letter
+            for cell in col:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except: pass
+            ws_hog.column_dimensions[column].width = max_length + 2
             
         # Auto-ancho columnas
         for col in ws.columns:
@@ -868,9 +1228,8 @@ def report_excel():
         if not site_data:
             return jsonify({"error": "Site no encontrado"}), 404
  
-        # 2. Obtener dispositivos del site
-        devices = query_latest_devices(client)
-        site_devices = [d for d in devices if str(d.get("site_id")) == str(site_id)]
+        # 2. Obtener dispositivos del site (histÃ³rico completo, incluye caÃ­dos >24h)
+        devices = query_site_devices_full(client, site_id)
  
         # Crear Excel en memoria
         wb = openpyxl.Workbook()
@@ -882,10 +1241,12 @@ def report_excel():
         
         # Hoja 1: Info General del Site
         ws1 = wb.active
-        ws1.title = "Información del Site"
+        ws1.title = "InformaciÃ³n del Site"
         
         headers_site = ["Campo", "Valor"]
         ws1.append(headers_site)
+
+        clients_total, clients_online = get_site_clients(site_data)
         
         site_info = [
             ("Site ID", site_data.get("site_id")),
@@ -897,10 +1258,10 @@ def report_excel():
             ("APs Online", site_data.get("ap_online", 0)),
             ("Disponibilidad", f"{round((site_data.get('ap_online', 0) / site_data.get('ap_count', 1) * 100), 0)}%" if site_data.get("ap_count", 0) > 0 else "0%"),
             ("APs Offline", site_data.get("ap_count", 0) - site_data.get("ap_online", 0)),
-            ("Clientes Totales", site_data.get("device_count")),
-            ("Clientes Online", site_data.get("devices_available")),
-            ("Capacidad Download", site_data.get("download_capacity")),
-            ("Capacidad Upload", site_data.get("upload_capacity")),
+            ("Clientes Totales", clients_total),
+            ("Clientes Online", clients_online),
+            ("Capacidad Download (Mbps)", round(site_data.get("download_capacity", 0) / 1e6, 4)),
+            ("Capacidad Upload (Mbps)", round(site_data.get("upload_capacity", 0) / 1e6, 4)),
         ]
         for row in site_info:
             ws1.append(row)
@@ -921,7 +1282,7 @@ def report_excel():
         headers_clients = ["Client ID", "Client Name", "Model", "Status", "IP", "MAC", "Signal", "Download", "Upload", "Last Connection"]
         ws_clients.append(headers_clients)
  
-        for d in site_devices:
+        for d in devices:
             # Formatear fecha
             last_conn = d.get("last_seen") or d.get("time")
             if last_conn:
@@ -960,7 +1321,7 @@ def report_excel():
                 cell.fill = header_fill
                 cell.alignment = center_alignment
             
-            # Ajustar ancho de columnas automáticamente (aproximado)
+            # Ajustar ancho de columnas automÃ¡ticamente (aproximado)
             for col in sheet.columns:
                 max_length = 0
                 column = col[0].column_letter
@@ -981,7 +1342,7 @@ def report_excel():
         wb.save(output)
         output.seek(0)
         
-        # Sanitizar nombre del archivo eliminando caracteres inválidos
+        # Sanitizar nombre del archivo eliminando caracteres invÃ¡lidos
         raw_name = site_data.get('site_name', site_id)
         safe_name = re.sub(r'[\\/*?:"<>|]', "_", str(raw_name))
         filename = f"Reporte_{safe_name}.xlsx"
@@ -1070,10 +1431,10 @@ def manage_users():
         name = data.get("name", username)
         
         if not username or not password:
-            return jsonify({"error": "Usuario y contraseña requeridos"}), 400
+            return jsonify({"error": "Usuario y contraseÃ±a requeridos"}), 400
             
         users = load_users()
-        users[username] = {"password": password, "role": role, "name": name}
+        users[username] = {"password": hash_password(password), "role": role, "name": name}
         save_users(users)
         return jsonify({"ok": True, "message": f"Usuario {username} creado/actualizado"})
 
@@ -1098,13 +1459,17 @@ def departments():
         client.close()
 
 
+
+
+
+
 def get_sites_in_operacion():
-    """Obtiene el mapeo de nombres de sites en Operación -> fecha_inicio"""
+    """Obtiene el mapeo de nombres de sites en OperaciÃ³n -> fecha_inicio"""
     client = get_influx_client()
     try:
-        # 1. Cargar desde base_operacion.xlsx (Fuente maestra de operación)
+        # 1. Cargar desde base_operacion.xlsx (Fuente maestra de operaciÃ³n)
         op_sites = {}
-        op_excel_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "base_operacion.xlsx")
+        op_excel_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "excel", "base_operacion.xlsx")
         if os.path.exists(op_excel_path):
             wb = openpyxl.load_workbook(op_excel_path, data_only=True)
             sheet = wb.active
@@ -1115,7 +1480,7 @@ def get_sites_in_operacion():
                 name = str(row[6] or "").strip().upper()
                 if not name: name = code
                 
-                # Col 15 (index 14) es fecha inicio operación
+                # Col 15 (index 14) es fecha inicio operaciÃ³n
                 f_inicio = str(row[14] or "") if row[14] else ""
                 op_sites[name] = {"fecha_inicio": f_inicio}
 
@@ -1123,7 +1488,7 @@ def get_sites_in_operacion():
         # 2. Cargar overrides
         overrides = load_estado_overrides()
         
-        # 3. Sincronizar con InfluxDB para capturar cambios dinámicos y nombres reales
+        # 3. Sincronizar con InfluxDB para capturar cambios dinÃ¡micos y nombres reales
         sites_influx = query_latest_sites(client)
         for s in sites_influx:
             full_name = s.get("site_name", "").strip()
@@ -1131,7 +1496,7 @@ def get_sites_in_operacion():
             code = code_match.group(1) if code_match else ""
             estado = (get_override_estado(overrides, code) or s.get("estado", "") or "").strip()
             
-            if estado.lower() == "operación":
+            if estado.lower() == "operaciÃ³n":
                 name = full_name
                 if code_match:
                     name = full_name[len(code):].strip()
@@ -1148,14 +1513,13 @@ def get_sites_in_operacion():
                         f_inicio = op_sites[name_up].get("fecha_inicio", "")
                     op_sites[name_up] = {"fecha_inicio": f_inicio}
 
-        logger.info(f"DEBUG: get_sites_in_operacion found {len(op_sites)} sites.")
         return op_sites
     except Exception as e:
         logger.exception("Error obteniendo sites en operacion")
         return {}
 
 def get_preventivos_data(filters):
-    """Lee el archivo Excel de preventivos y agrega los datos según filtros"""
+    """Lee el archivo Excel de preventivos y agrega los datos segÃºn filtros"""
     file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "Indicador preventivos V2.xlsx")
     if not os.path.exists(file_path):
         return {"error": "Archivo de preventivos no encontrado"}, 404
@@ -1197,8 +1561,7 @@ def get_preventivos_data(filters):
             if date_val:
                 year = date_val.year
                 month_name = date_val.strftime("%b").lower()
-                month_map = {"jan":"ene", "feb":"feb", "mar":"mar", "apr":"abr", "may":"may", "jun":"jun", 
-                             "jul":"jul", "aug":"ago", "sep":"sep", "oct":"oct", "nov":"nov", "dec":"dic"}
+                MONTH_MAP
                 month_es = month_map.get(month_name, month_name)
                 
                 if year_filter and str(year) != year_filter:
@@ -1211,7 +1574,7 @@ def get_preventivos_data(filters):
             
             filtered_rows.append(row)
         
-        # --- Lógica para la primera gráfica (Inicio Operación) ---
+        # --- LÃ³gica para la primera grÃ¡fica (Inicio OperaciÃ³n) ---
         COL_OP_START = 9
         max_year, max_month_val = 2025, 12
         
@@ -1226,8 +1589,7 @@ def get_preventivos_data(filters):
             if isinstance(op_date, datetime.datetime):
                 op_year = op_date.year
                 op_month_name = op_date.strftime("%b").lower()
-                month_map = {"jan":"ene", "feb":"feb", "mar":"mar", "apr":"abr", "may":"may", "jun":"jun", 
-                             "jul":"jul", "aug":"ago", "sep":"sep", "oct":"oct", "nov":"nov", "dec":"dic"}
+                MONTH_MAP
                 op_month_es = month_map.get(op_month_name, op_month_name)
                 m_val = month_order.get(op_month_es, 0)
                 if op_year > max_year or (op_year == max_year and m_val > max_month_val):
@@ -1245,14 +1607,13 @@ def get_preventivos_data(filters):
             if isinstance(op_date, datetime.datetime):
                 op_year = op_date.year
                 op_month_name = op_date.strftime("%b").lower()
-                month_map = {"jan":"ene", "feb":"feb", "mar":"mar", "apr":"abr", "may":"may", "jun":"jun", 
-                             "jul":"jul", "aug":"ago", "sep":"sep", "oct":"oct", "nov":"nov", "dec":"dic"}
+                MONTH_MAP
                 op_month_es = month_map.get(op_month_name, op_month_name)
                 key = (op_year, op_month_es)
                 if key not in stats:
                     stats[key] = {"Ejecutado": 0, "Pendiente": 0}
                 
-                # Estado Programación Preventivo (Index 14, columna real de datos)
+                # Estado ProgramaciÃ³n Preventivo (Index 14, columna real de datos)
                 estado_val = str(row[14] or "").strip() if len(row) > 14 else ""
                 if "EJECUTADO" in estado_val.upper():
                     stats[key]["Ejecutado"] += 1
@@ -1280,14 +1641,13 @@ def get_preventivos_data(filters):
             dept = str(row[3] or "").strip()
             if dept_filter and dept_filter != "all" and dept_filter.lower() not in dept.lower(): continue
             
-            # Usar la columna de estado (14 = Estado Programación Preventivo)
+            # Usar la columna de estado (14 = Estado ProgramaciÃ³n Preventivo)
             estado_val = str(row[14] or "").strip() if len(row) > 14 else ""
             if "EJECUTADO" in estado_val.upper():
                 date_val = row[15] if len(row) > 15 and isinstance(row[15], datetime.datetime) else None
                 if date_val:
                     month_name = date_val.strftime("%b").lower()
-                    month_map = {"jan":"ene", "feb":"feb", "mar":"mar", "apr":"abr", "may":"may", "jun":"jun", 
-                                 "jul":"jul", "aug":"ago", "sep":"sep", "oct":"oct", "nov":"nov", "dec":"dic"}
+                    MONTH_MAP
                     month_es = month_map.get(month_name, month_name)
                     if month_es:
                         exec_month_stats[month_es] = exec_month_stats.get(month_es, 0) + 1
@@ -1353,13 +1713,13 @@ def preventivos_excel():
         
         for row in sheet_src.iter_rows(min_row=2, values_only=True):
             if not row or len(row) < 3: continue
-            # Filtro: Solo juntas en OPERACIÓN
+            # Filtro: Solo juntas en OPERACIÃ“N
             site_name = str(row[2] or "").strip().upper()
             if site_name not in op_sites:
                 continue
             
             dept = str(row[3] or "").strip()
-            date_val = row[15] if isinstance(row[15], datetime.datetime) else row[16]
+            date_val = row[15] if len(row) > 15 and isinstance(row[15], datetime.datetime) else (row[16] if len(row) > 16 and isinstance(row[16], datetime.datetime) else None)
             
             if dept_filter and dept_filter != "all" and dept_filter.lower() not in dept.lower():
                 continue
@@ -1367,8 +1727,7 @@ def preventivos_excel():
             if isinstance(date_val, datetime.datetime):
                 year = date_val.year
                 month_name = date_val.strftime("%b").lower()
-                month_map = {"jan":"ene", "feb":"feb", "mar":"mar", "apr":"abr", "may":"may", "jun":"jun", 
-                             "jul":"jul", "aug":"ago", "sep":"sep", "oct":"oct", "nov":"nov", "dec":"dic"}
+                MONTH_MAP
                 month_es = month_map.get(month_name, month_name)
                 
                 if year_filter and str(year) != year_filter:
@@ -1393,7 +1752,7 @@ def preventivos_excel():
         for row in ws_out.iter_rows(min_row=2):
             for cell in row:
                 cell.alignment = Alignment(horizontal="left", vertical="center")
-                # Centrar columna de fecha y estado (ajustar indices según headers)
+                # Centrar columna de fecha y estado (ajustar indices segÃºn headers)
                 # Basado en el excel original: Col 15 (Estado) y Col 16 (Fecha)
                 if cell.column == 15 or cell.column == 16:
                     cell.alignment = center_alignment
@@ -1426,7 +1785,7 @@ def preventivos_excel():
 @app.route("/api/preventivos/list")
 @token_required
 def preventivos_list():
-    """Obtiene la lista completa de preventivos para la tabla de gestión"""
+    """Obtiene la lista completa de preventivos para la tabla de gestiÃ³n"""
     dept_filter = request.args.get("department")
     status_filter = request.args.get("status")
     file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "Indicador preventivos V2.xlsx")
@@ -1446,8 +1805,8 @@ def preventivos_list():
         for row in sheet.iter_rows(min_row=2, values_only=True):
             if not row or len(row) < 3: continue
             try:
-                # indices 0-based: 1: ID JUNTA, 2: JUNTA DE INTERNET, 3: DEPARTAMENTO, 9: Fecha Inicio Operación, 
-                # 14: Estado Programación Preventivo (data real), 15: Fecha Preventivo
+                # indices 0-based: 1: ID JUNTA, 2: JUNTA DE INTERNET, 3: DEPARTAMENTO, 9: Fecha Inicio OperaciÃ³n, 
+                # 14: Estado ProgramaciÃ³n Preventivo (data real), 15: Fecha Preventivo
                 
                 site_name = str(row[2] or "").strip().upper()
                 if site_name not in op_sites:
@@ -1468,10 +1827,10 @@ def preventivos_list():
                     fecha_prev = row[15].isoformat()
                 row_dict["FECHA_PREVENTIVO"] = fecha_prev
 
-                # Estado Programación Preventivo (Index 14, columna real de datos)
+                # Estado ProgramaciÃ³n Preventivo (Index 14, columna real de datos)
                 estado_val = str(row[14] or "").strip() if len(row) > 14 else ""
                 if not estado_val:
-                    # Fallback: búsqueda en toda la fila
+                    # Fallback: bÃºsqueda en toda la fila
                     for cell in row:
                         if cell and isinstance(cell, str):
                             if "EJECUTADO" in cell.upper():
@@ -1540,7 +1899,7 @@ def update_preventivo():
         wb = openpyxl.load_workbook(file_path)
         sheet = wb.active
         
-        # Columnas: 1: ID JUNTA, 15: Estado Programación Preventivo, 16: Fecha Preventivo
+        # Columnas: 1: ID JUNTA, 15: Estado ProgramaciÃ³n Preventivo, 16: Fecha Preventivo
         # Nota: openpyxl usa indexacion 1. Col 22 (Estado Preventivo) es FORMULA derivada de col 15.
         COL_ID = 2 
         COL_DATE = 16
@@ -1549,11 +1908,11 @@ def update_preventivo():
         found = False
         for row in sheet.iter_rows(min_row=2):
             if str(row[COL_ID-1].value) == str(junta_id):
-                # Actualizar estado si se proporcionó
+                # Actualizar estado si se proporcionÃ³
                 if new_status:
                     row[COL_STATUS-1].value = new_status
                 
-                # Actualizar fecha si se proporcionó
+                # Actualizar fecha si se proporcionÃ³
                 if new_date_str:
                     try:
                         # Formato YYYY-MM-DD
@@ -1579,7 +1938,7 @@ def update_preventivo():
 # ---------------------------------------------------------------------------
 
 TICKET_COL = "#Ticket"
-PARADA_DAYS_COL = "Días Parada Reloj"
+PARADA_DAYS_COL = "DÃ­as Parada Reloj"
 
 
 def find_tickets_file():
@@ -1597,6 +1956,59 @@ def find_tickets_file():
         if os.path.exists(p):
             return p
     return None
+
+
+_tickets_cache = {"mtime": None, "open_by_code": {}}
+
+
+def get_tickets_open_map():
+    """{codigo INRED (6 dÃ­gitos): [ticket_id abiertos]}"""
+    file_path = find_tickets_file()
+    if not file_path:
+        return {}
+
+    try:
+        mtime = os.path.getmtime(file_path)
+    except OSError:
+        return {}
+
+    if _tickets_cache["mtime"] == mtime:
+        return _tickets_cache["open_by_code"]
+
+    by_code = {}
+    try:
+        wb = openpyxl.load_workbook(file_path, data_only=True)
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            headers = [str(c.value).strip() if c.value else "" for c in ws[1]]
+            if not headers or "Ticket Estado" not in headers or "CÃ³digo Operador" not in headers:
+                continue
+            st_idx = headers.index("Ticket Estado")
+            co_idx = headers.index("CÃ³digo Operador")
+            tk_idx = headers.index(TICKET_COL) if TICKET_COL in headers else None
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if not row or st_idx >= len(row) or co_idx >= len(row):
+                    continue
+                estado = str(row[st_idx] or "").strip().lower()
+                if estado != "abierto":
+                    continue
+                m = re.search(r"(\d{6})", str(row[co_idx] or ""))
+                if not m:
+                    continue
+                tid = None
+                if tk_idx is not None and tk_idx < len(row) and row[tk_idx] is not None:
+                    tid = str(row[tk_idx]).strip()
+                by_code.setdefault(m.group(1), [])
+                if tid:
+                    by_code[m.group(1)].append(tid)
+        wb.close()
+    except Exception as e:
+        logger.exception("Error cargando tickets abiertos")
+
+    _tickets_cache["mtime"] = mtime
+    _tickets_cache["open_by_code"] = by_code
+    logger.info(f"Juntas con tickets abiertos: {len(by_code)}")
+    return by_code
 
 
 def load_tickets_data():
@@ -1662,6 +2074,12 @@ def parse_dt(value):
     return None
 
 
+def fmt_fecha_legible(value):
+    """Formatea a dd/mm/aaaa hh:mm (legible en reportes) o cadena vacÃ­a"""
+    dt = parse_dt(value)
+    return dt.strftime("%d/%m/%Y %H:%M") if dt else ""
+
+
 def enrich_ticket(rec, paradas, now_dt):
     """Calcula horas totales, horas de parada de reloj y horas netas de un ticket.
     Los tickets con prioridad Baja no generan horas de indisponibilidad."""
@@ -1689,6 +2107,14 @@ def enrich_ticket(rec, paradas, now_dt):
     indisp_bruta = horas_total if not es_prioridad_baja else 0.0
     indisp_neta = horas_netas if not es_prioridad_baja else 0.0
 
+    sub_proy = str(rec.get("Sub Proyecto") or "").strip().upper()
+    if "SEGUIMIENTO INTERNO" in sub_proy:
+        subtipo = "seguimiento_interno"
+        subtipo_label = "Juntas seguimiento interno"
+    else:
+        subtipo = "juntas"
+        subtipo_label = "Juntas"
+
     out = dict(rec)
     out.update({
         "ticket_estado": estado,
@@ -1703,7 +2129,7 @@ def enrich_ticket(rec, paradas, now_dt):
         "indisp_neta_horas": round(indisp_neta, 2),
         "categoria": str(rec.get("Categoria") or "").strip(),
         "departamento": str(rec.get("Departamento") or "").strip(),
-        "codigo_operador": str(rec.get("Código Operador") or "").strip(),
+        "codigo_operador": str(rec.get("CÃ³digo Operador") or "").strip(),
         "municipio": str(rec.get("Municipio") or "").strip(),
         "centro_poblado": str(rec.get("Centro Poblado") or "").strip(),
         "tipo": str(rec.get("Tipo") or "").strip(),
@@ -1711,6 +2137,8 @@ def enrich_ticket(rec, paradas, now_dt):
         "prioridad": prioridad,
         "grupo_escalamiento": str(rec.get("Grupo Escalamiento") or "").strip(),
         "sub_proyecto": str(rec.get("Sub Proyecto") or "").strip(),
+        "subtipo": subtipo,
+        "subtipo_label": subtipo_label,
     })
     return out
 
@@ -1733,6 +2161,9 @@ def filter_tickets(tickets, filters, now_dt):
             if filters["tipo"].lower() == "incidente" and "incidente" not in t.get("tipo", "").lower():
                 continue
             if filters["tipo"].lower() == "peticion" and "petici" not in t.get("tipo", "").lower():
+                continue
+        if filters.get("subtipo") and filters["subtipo"] != "all":
+            if t.get("subtipo", "") != filters["subtipo"]:
                 continue
         f_inicio = parse_dt(t.get("Fecha Inicio"))
         if filters.get("from"):
@@ -1769,6 +2200,7 @@ def tickets_stats():
         "junta": request.args.get("junta"),
         "estado": request.args.get("estado"),
         "tipo": request.args.get("tipo"),
+        "subtipo": request.args.get("subtipo"),
         "from": request.args.get("from"),
         "to": request.args.get("to"),
         "search": request.args.get("search", "").strip(),
@@ -1845,6 +2277,7 @@ def tickets_list():
         "junta": request.args.get("junta"),
         "estado": request.args.get("estado"),
         "tipo": request.args.get("tipo"),
+        "subtipo": request.args.get("subtipo"),
         "from": request.args.get("from"),
         "to": request.args.get("to"),
         "search": request.args.get("search", "").strip(),
@@ -1885,6 +2318,7 @@ def tickets_months():
         "junta": request.args.get("junta"),
         "estado": request.args.get("estado"),
         "tipo": request.args.get("tipo"),
+        "subtipo": request.args.get("subtipo"),
         "from": request.args.get("from"),
         "to": request.args.get("to"),
         "search": request.args.get("search", "").strip(),
@@ -1923,6 +2357,7 @@ def tickets_excel():
         "junta": request.args.get("junta"),
         "estado": request.args.get("estado"),
         "tipo": request.args.get("tipo"),
+        "subtipo": request.args.get("subtipo"),
         "from": request.args.get("from"),
         "to": request.args.get("to"),
         "search": request.args.get("search", "").strip(),
@@ -1944,10 +2379,10 @@ def tickets_excel():
     center_alignment = Alignment(horizontal="center", vertical="center")
 
     headers = [
-        "#Ticket", "Código Operador", "Departamento", "Municipio", "Centro Poblado",
-        "Fecha Inicio", "Fecha Fin", "Estado", "Categoría", "Sub Proyecto", "Tipo",
+        "#Ticket", "CÃ³digo Operador", "Departamento", "Municipio", "Centro Poblado",
+        "Fecha Inicio", "Fecha Fin", "Estado", "CategorÃ­a", "Sub Proyecto", "Tipo",
         "Grupo Escalamiento", "Prioridad", "Responsable",
-        "Horas Total", "Días Parada Reloj", "Horas Parada", "Horas Netas",
+        "Horas Total", "DÃ­as Parada Reloj", "Horas Parada", "Horas Netas",
         "Indisponibilidad Bruta (h)", "Indisponibilidad Neta (h)",
     ]
     ws_out.append(headers)
@@ -1963,8 +2398,8 @@ def tickets_excel():
             t.get("departamento", ""),
             t.get("municipio", ""),
             t.get("centro_poblado", ""),
-            t.get("fecha_inicio", ""),
-            t.get("fecha_fin", ""),
+            fmt_fecha_legible(t.get("fecha_inicio")),
+            fmt_fecha_legible(t.get("fecha_fin")),
             t.get("ticket_estado", ""),
             t.get("categoria", ""),
             t.get("sub_proyecto", ""),
@@ -2008,7 +2443,7 @@ def tickets_upload():
     """Carga un archivo Excel de tickets (hoja de tickets + hoja de paradas)"""
     file = request.files.get("file")
     if not file or not file.filename:
-        return jsonify({"error": "No se recibió ningún archivo"}), 400
+        return jsonify({"error": "No se recibiÃ³ ningÃºn archivo"}), 400
     if not file.filename.lower().endswith(".xlsx"):
         return jsonify({"error": "El archivo debe ser .xlsx"}), 400
 
@@ -2076,7 +2511,7 @@ def tickets_detail(ticket_id):
 
     seguimiento = []
     seguimiento.extend(parse_seguimiento(ticket.get("Comentario Apertura")))
-    seguimiento.extend(parse_seguimiento(ticket.get("Comentario Solución")))
+    seguimiento.extend(parse_seguimiento(ticket.get("Comentario SoluciÃ³n")))
     if not seguimiento:
         seguimiento.append({
             "tipo": "Apertura",
@@ -2139,6 +2574,7 @@ def tickets_juntas():
         "junta": request.args.get("junta"),
         "estado": request.args.get("estado"),
         "tipo": request.args.get("tipo"),
+        "subtipo": request.args.get("subtipo"),
         "from": request.args.get("from"),
         "to": request.args.get("to"),
         "search": request.args.get("search", "").strip(),
@@ -2220,5 +2656,5 @@ if __name__ == "__main__":
         )
 
     port = int(os.getenv("DASHBOARD_PORT", 5000))
-    debug = True
+    debug = os.getenv("FLASK_DEBUG", "false").lower() == "true"
     app.run(host="0.0.0.0", port=port, debug=debug)

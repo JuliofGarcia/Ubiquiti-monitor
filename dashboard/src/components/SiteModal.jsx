@@ -22,6 +22,10 @@ export default function SiteModal({ site, onClose }) {
         <div className="modal-body">
 <div className="modal-grid">
     <div className="modal-item"><strong>Departamento:</strong> {site.department || "—"}</div>
+    <div className="modal-item"><strong>Grupo:</strong> <span className={`badge ${site.grupo && site.grupo !== "Sin grupo" ? "badge-active" : ""}`}>{site.grupo || "—"}</span></div>
+    <div className="modal-item"><strong>TK abiertos:</strong> {site.tickets_abiertos > 0 ? (
+      <span className="badge badge-inactive">{(site.tickets_num || []).join(", ") || site.tickets_abiertos}</span>
+    ) : "—"}</div>
     <div className="modal-item"><strong>Etapa:</strong> <span className={`badge ${site.estado === "Operación" ? "badge-active" : ""}`}>{site.estado || "—"}</span></div>
             <div className="modal-item"><strong>Inicio Operación:</strong> {site.fecha_inicio || "—"}</div>
             <div className="modal-item"><strong>Horas caído:</strong> {(() => {
@@ -45,12 +49,12 @@ export default function SiteModal({ site, onClose }) {
             })()}</div>
             <div className="modal-item"><strong>Última conexión:</strong> {site.last_online && site.last_online !== "0001-01-01T00:00:00Z" ? new Date(site.last_online).toLocaleString("es-CO") : "—"}</div>
             <div className="modal-item"><strong>Online:</strong> {site.online ? "Sí" : "No"}</div>
-            <div className="modal-item"><strong>Total Clientes:</strong> {site.device_count || 0}</div>
-            <div className="modal-item"><strong>Clientes Online:</strong> {site.devices_available || 0}</div>
-            <div className="modal-item"><strong>Clientes Offline:</strong> {site.device_outage_count ?? (site.device_count || 0) - (site.devices_available || 0)}</div>
+            <div className="modal-item"><strong>Total Clientes:</strong> {(site.lb5_count ?? site.device_count) || 0}</div>
+            <div className="modal-item"><strong>Clientes Online:</strong> {(site.lb5_online ?? site.devices_available) || 0}</div>
+            <div className="modal-item"><strong>Clientes Offline:</strong> {((site.lb5_count ?? site.device_count) || 0) - ((site.lb5_online ?? site.devices_available) || 0)}</div>
             <div className="modal-item"><strong>Access Point:</strong> {(site.ap_online || 0)} / {(site.ap_total || site.ap_count || 0)}</div>
-            <div className="modal-item"><strong>Tráfico Rx:</strong> {Number(site.download_capacity || 0).toFixed(4)}</div>
-            <div className="modal-item"><strong>Tráfico Tx:</strong> {Number(site.upload_capacity || 0).toFixed(4)}</div>
+            <div className="modal-item"><strong>Tráfico Rx:</strong> {Number((site.download_capacity || 0) / 1e6).toFixed(2)} Mbps</div>
+            <div className="modal-item"><strong>Tráfico Tx:</strong> {Number((site.upload_capacity || 0) / 1e6).toFixed(2)} Mbps</div>
           </div>
           {stats && (
             <div className="modal-stats">
